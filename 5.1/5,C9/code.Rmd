@@ -1,0 +1,1986 @@
+---
+title: "Case Study Code"
+output: pdf_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, 
+                      fig.height=4, fig.width=10)
+```
+
+## 1. True Linked Data
+
+### Data Preparation
+
+```{r}
+library(nhanesA) # to access NHANES data
+library(dplyr)
+
+# Pull demographics, field body measures, and clinical DXA scans
+demo_data <- nhanes("DEMO_J")
+bmx_data  <- nhanes("BMX_J") # can calc via height and weight (like "survey")
+dxx_data  <- nhanes("DXX_J") # expensive to get ("administrative"/"claims")
+
+# Clean and link the datasets
+nhanes_pop <- demo_data %>%
+ inner_join(bmx_data, by = "SEQN") %>%
+ inner_join(dxx_data, by = "SEQN") %>%
+ dplyr::select(SEQN, RIDAGEYR, RIAGENDR, INDFMPIR, BMXBMI, DXDTOPF) %>%
+ # Filter for adults with valid Field BMI and valid Clinical DXA Fat %
+ filter(RIDAGEYR >= 20, !is.na(BMXBMI), !is.na(DXDTOPF), !is.na(INDFMPIR)) %>%
+ # Make gender a numeric dummy variable
+ mutate(RIAGENDRFemale = ifelse(RIAGENDR == "Female", 1, 0)) 
+
+N_pop <- nrow(nhanes_pop)
+cat(sprintf("N = %d records.\n\n", N_pop))
+
+# FOR SUPPLEMENT
+cat("Total DEMO_J records:", nrow(demo_data), "\n")
+cat("Total BMX_J records:", nrow(bmx_data), "\n")
+cat("Total DXX_J records:", nrow(dxx_data), "\n")
+
+# Merge
+merged_all <- demo_data %>%
+  inner_join(bmx_data, by="SEQN") %>%
+  inner_join(dxx_data, by="SEQN")
+
+cat("Records after inner join:", nrow(merged_all), "\n")
+
+# Filter Age >= 20
+adults <- merged_all %>% filter(RIDAGEYR >= 20)
+cat("Records after Age >= 20 filter:", nrow(adults), "\n")
+
+# Complete cases for model variables
+analytic_sample <- adults %>% 
+  dplyr::select(SEQN, RIDAGEYR, RIAGENDR, INDFMPIR, BMXBMI, DXDTOPF) %>%
+  filter(!is.na(BMXBMI), !is.na(DXDTOPF), !is.na(INDFMPIR))
+
+cat("Final complete cases (Analytic Sample):", nrow(analytic_sample), "\n")
+cat("Total records dropped due to NA in target variables:", nrow(adults) - nrow(analytic_sample), "\n")
+```
+
+### Oracle Outcome Model
+
+```{r fig.height=7, fig.width=10}
+oracle_model <- lm(DXDTOPF ~ BMXBMI + I(BMXBMI^2) + RIDAGEYR + RIAGENDRFemale
+                   + BMXBMI * RIDAGEYR, data = nhanes_pop)
+summary(oracle_model)
+
+par(mfrow = c(2, 2))
+plot(DXDTOPF ~ BMXBMI + I(BMXBMI^2) + RIDAGEYR + RIAGENDRFemale
+                   + BMXBMI * RIDAGEYR, nhanes_pop)
+par(mfrow = c(1, 1))
+
+library(ggplot2)
+library(patchwork)
+
+# Get diagnostic data from the Oracle model
+diag_data <- data.frame(
+  Fitted = fitted(oracle_model),
+  Residuals = residuals(oracle_model),
+  StdResiduals = rstandard(oracle_model),
+  Leverage = hatvalues(oracle_model)
+)
+
+# Plot A: Residuals vs Fitted (Linearity)
+p_res_fit <- ggplot(diag_data, aes(x = Fitted, y = Residuals)) +
+  geom_point(shape = 19, alpha = 0.4, color = "#2c3e50") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "#e74c3c",
+             linewidth = 0.8) +
+  geom_smooth(method = "loess", se = FALSE, color = "black", 
+              linewidth = 0.8) +
+  theme_bw(base_size = 11) +
+  labs(title = "Residuals vs. Fitted", x = "Fitted Values", y = "Residuals") +
+  theme(    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold"))
+
+# Plot B: Normal Q-Q (Normality)
+p_qq <- ggplot(diag_data, aes(sample = StdResiduals)) +
+  stat_qq(alpha = 0.4, shape = 19, color = "#2c3e50") +
+  stat_qq_line(color = "#e74c3c", linetype = "dashed", linewidth = 0.8) +
+  theme_bw(base_size = 11) +
+  labs(title = "Normal Q-Q", x = "Theoretical Quantiles", 
+       y = "Standardized Residuals") +
+  theme(    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold"))
+
+# Plot C: Scale-Location (Homoscedasticity)
+p_scale <- ggplot(diag_data, aes(x = Fitted, 
+                                 y = sqrt(abs(StdResiduals)))) +
+  geom_point(alpha = 0.4, color = "#2c3e50") +
+  geom_smooth(method = "loess", se = FALSE, color = "black", 
+              linewidth = 0.8) +
+  theme_bw(base_size = 11) +
+  labs(title = "Scale-Location", x = "Fitted Values", y = expression(sqrt("|Standardized Residuals|"))) +
+  theme(    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold"))
+
+# Plot D: Residuals vs Leverage (Outliers / Influence)
+p_lev <- ggplot(diag_data, aes(x = Leverage, y = StdResiduals)) +
+ scale_x_continuous(labels = function(x) sprintf("%.3f", x)) +
+  geom_point(alpha = 0.4, color = "#2c3e50") +
+  geom_smooth(method = "loess", se = FALSE, color = "black", 
+              linewidth = 0.8) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "#e74c3c",
+             linewidth = 0.8) +
+  theme_bw(base_size = 11) +
+  labs(title = "Residuals vs. Leverage", x = "Leverage", 
+       y = "Standardized Residuals") +
+  theme(    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold"))
+
+# Combine into a 2x2 grid
+diagnostic_plot <- (p_res_fit + p_qq) / (p_scale + p_lev) +
+ plot_annotation(tag_levels = 'A')
+
+# Save as high-res PNG
+ggsave("FigureS3.pdf", plot = diagnostic_plot, width = 10, 
+       height = 8, dpi = 600)
+```
+
+## 2. `fastLink` Match Probabilities
+
+```{r}
+set.seed(100723)
+
+library(dplyr)
+library(fastLink)
+library(stringdist)
+library(stringr)
+library(clue)
+library(ggplot2)
+
+###########################################################################
+### Generate Fake Matching Variables Without Corruption ###
+###########################################################################
+fakemv <- read.csv("fakedata.csv")
+# https://community.rstudio.com/t/converting-dates-year-month-day-to-3-
+# separate-columns-year-month-day/8585/4
+fakemv <- fakemv %>%
+ select(GivenName = "GivenName",
+        Surname = "Surname",
+        ZipCode = "ZipCode") %>%
+ mutate(
+  ZipCode = as.character(ZipCode),
+  ZipCode = str_pad(
+   ZipCode,
+   width = 5,
+   side = "left",
+   pad = "0"
+  )
+ )
+
+# SRS of fake matching variables data
+srsfakemv <- slice_sample(fakemv, n = 18000)
+write.csv(srsfakemv[1:9000, ],
+          "fakemv18ksrs1.csv",
+          row.names = FALSE,
+          quote = FALSE)
+write.csv(srsfakemv[9001:nrow(srsfakemv), ],
+          "fakemv18ksrs2.csv",
+          row.names = FALSE,
+          quote = FALSE)
+
+###########################################################################
+### Use GeCo for corruption (trial-and-error) ###
+### Prepare the corrupted identifiers data ###
+###########################################################################
+
+set.seed(2026)
+
+parse_geco_batch <- function(file_path, id_offset = 0) {
+ df <- read.csv(file_path, stringsAsFactors = FALSE)
+ 
+ # Split into File A (org) and File B (dup) by searching for the exact suffix
+ dfA <- df %>% filter(grepl("-org$", rec_id))
+ dfB <- df %>% filter(grepl("-dup-", rec_id))
+ 
+ dfA[is.na(dfA)] <- ""
+ dfB[is.na(dfB)] <- ""
+ 
+ # Numeric ID from between 'rec-' and the suffix, then apply the offset
+ dfA$true_id <- as.integer(sub("^rec-([0-9]+)-org$", "\\1", dfA$rec_id)) + 
+  id_offset
+ dfB$true_id <- as.integer(sub("^rec-([0-9]+)-dup-.*", "\\1", dfB$rec_id)) +
+  id_offset
+ 
+ # Sort File B to match File A's true_id order
+ dfB <- dfB[match(dfA$true_id, dfB$true_id), ]
+ 
+ return(list(
+  A = dfA,
+  B = dfB,
+  max_id = max(dfA$true_id)
+ ))
+}
+
+batch1 <- parse_geco_batch("fakemv18ksrs1_corrupt.csv", id_offset = 0)
+batch2 <- parse_geco_batch("fakemv18ksrs2_corrupt.csv", 
+                           id_offset = batch1$max_id + 1)
+dfA_full <- bind_rows(batch1$A, batch2$A)
+dfB_full <- bind_rows(batch1$B, batch2$B)
+N_total <- nrow(dfA_full)
+
+# nrow(dfA_full) != nrow(dfB_full)) - check that File A and File B sizes match
+# any(duplicated(dfA_full$true_id))) - check no duplicate ground-truth IDs
+
+###########################################################################
+### Run fastLink and 1:1 Matching ###
+###########################################################################
+invisible(capture.output({
+ fl_out <- fastLink(
+  dfA = dfA_full,
+  dfB = dfB_full,
+  varnames = c("GivenName", "Surname"),
+  stringdist.match = c("GivenName", "Surname"),
+  threshold.match = 1e-4,
+  verbose = FALSE
+ )
+}))
+
+fl_matches <- data.frame(
+ inds.a = fl_out$matches$inds.a,
+ inds.b = fl_out$matches$inds.b,
+ posterior = fl_out$posterior
+)
+
+# Sort by highest posterior probability first
+fl_matches <- fl_matches[order(fl_matches$posterior, decreasing = TRUE), ]
+
+# Fast Greedy Assignment Loop
+matched_a <- logical(N_total)
+matched_b <- logical(N_total)
+keep_idx <- logical(nrow(fl_matches))
+
+a_idx <- fl_matches$inds.a
+b_idx <- fl_matches$inds.b
+
+for (i in seq_len(nrow(fl_matches))) {
+ if (!matched_a[a_idx[i]] && !matched_b[b_idx[i]]) {
+  keep_idx[i] <- TRUE
+  matched_a[a_idx[i]] <- TRUE
+  matched_b[b_idx[i]] <- TRUE
+ }
+}
+
+# Get 1:1 matched pairs
+mp_df <- fl_matches[keep_idx, ]
+
+# Pad the unassigned records (below threshold)
+unmatched_a <- which(!matched_a)
+unmatched_b <- which(!matched_b)
+
+if (length(unmatched_a) > 0) {
+ # Randomly pair the unassigned leftovers and give them bounding zeroes
+ padding_df <- data.frame(
+  inds.a = unmatched_a,
+  inds.b = sample(unmatched_b),
+  posterior = runif(length(unmatched_a), min = 1e-7, max = 1e-5)
+ )
+ mp_df <- bind_rows(mp_df, padding_df)
+}
+
+# any(duplicated(mp_df$inds.a)) | any(duplicated(mp_df$inds.b)) - check 1:1
+
+###########################################################################
+### Evaluate Similarity Score and Results ###
+###########################################################################
+
+# ???
+mp_df$is_true_mismatch <- dfA_full$true_id[mp_df$inds.a] != dfB_full$true_id[mp_df$inds.b]
+
+jw_first <- 1 - stringdist(dfA_full$GivenName[mp_df$inds.a],
+                           dfB_full$GivenName[mp_df$inds.b],
+                           method = "jw",
+                           p = 0.1)
+jw_last  <- 1 - stringdist(dfA_full$Surname[mp_df$inds.a],
+                           dfB_full$Surname[mp_df$inds.b],
+                           method = "jw",
+                           p = 0.1)
+jw_zip   <- 1 - stringdist(dfA_full$ZipCode[mp_df$inds.a],
+                           dfB_full$ZipCode[mp_df$inds.b],
+                           method = "jw",
+                           p = 0.1)
+
+mp_df$True_String_Score <- (jw_first + jw_last + jw_zip) / 3
+
+errors_pool <- mp_df %>% filter(is_true_mismatch == TRUE &
+                                 posterior > 0.01)
+corrupt_matches_pool <- mp_df %>% filter(is_true_mismatch == FALSE &
+                                          True_String_Score < 0.99)
+clean_matches_pool <- mp_df %>% filter(is_true_mismatch == FALSE &
+                                        True_String_Score >= 0.99)
+
+tau_fakedata <- nrow(corrupt_matches_pool) / (nrow(corrupt_matches_pool) +
+                                               nrow(clean_matches_pool))
+print(tau_fakedata) # true match noise rate
+print(nrow(errors_pool)) # number of mismatches (need >= 996 for 50% target)
+
+N_cohort <- 1993
+target_rates <- c(0.05, 0.15, 0.30, 0.50)
+linkage_posteriors_list <- list()
+
+for (rate in target_rates) {
+ n_errors <- round(N_cohort * rate)
+ n_true_matches <- N_cohort - n_errors
+ 
+ n_corrupt <- round(n_true_matches * tau_fakedata)
+ n_clean <- n_true_matches - n_corrupt
+ 
+ smp_errors <-errors_pool[sample(nrow(errors_pool), n_errors, replace = FALSE),]
+ smp_corrupt  <- corrupt_matches_pool[sample(nrow(corrupt_matches_pool), 
+                                             n_corrupt, replace = FALSE), ]
+ smp_clean  <- clean_matches_pool[sample(nrow(clean_matches_pool), n_clean, 
+                                         replace = FALSE), ]
+ 
+ geco_sample <- rbind(smp_errors, smp_corrupt, smp_clean)
+ geco_shuffled <- geco_sample[sample(nrow(geco_sample)), ]
+ 
+ mp_df_sorted <- geco_shuffled[order(geco_shuffled$True_String_Score, 
+                                     decreasing = FALSE), ]
+ mp_df_sorted <- mp_df_sorted %>% rename(Z_FL = posterior)
+ mp_df_sorted$Target_Rate <- factor(rate)
+ 
+ # nrow(mp_df_sorted) != N_cohort - check if cohort size error
+
+ realized_rate <- sum(mp_df_sorted$is_true_mismatch) / N_cohort
+ # abs(realized_rate - rate) > 0.001 - check if realized rate not near target
+ 
+ linkage_posteriors_list[[paste0("Rate_", rate)]] <- mp_df_sorted %>%
+  dplyr::select(Z_FL, True_String_Score, is_true_mismatch, Target_Rate)
+ 
+ cat(
+  sprintf(
+   "Target: %.2f, Mismatches: %d , Corrupted: %d , Clean: %d \n",
+   rate,
+   n_errors,
+   n_corrupt,
+   n_clean
+  )
+ )
+}
+
+# EMPIRICAL GECO POSTERIOR DISTRIBUTIONS
+diag_df <- bind_rows(linkage_posteriors_list) %>%
+  mutate(
+    Match_Status = ifelse(is_true_mismatch, "Mismatch", "True Match"),
+    Match_Status = factor(Match_Status, levels = c("True Match", "Mismatch")),
+    Facet_Label = factor(
+      paste0(as.numeric(as.character(Target_Rate)) * 100, "% Mismatch Rate"),
+      levels = paste0(c(5, 15, 30, 50), "% Mismatch Rate")
+    )
+  )
+
+p <- ggplot(diag_df, aes(x = Z_FL, fill = Match_Status)) +
+  geom_density(alpha = 0.6, color = "black", adjust = 1.5, 
+               linewidth = 0.3) +
+  facet_wrap(~Facet_Label, scales = "free_y", ncol = 2) +
+  scale_fill_manual(values = c(
+    "True Match" = "#3498db", 
+    "Mismatch"   = "#e74c3c"  
+  )) +
+  scale_x_continuous(expand = c(0, 0), limits = c(0, 1)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.08))) +
+  coord_cartesian(clip = "off") + 
+  theme_bw(base_size = 14, base_family = "sans") +
+  labs(
+    x = "fastLink Posterior Match Probability",
+    y = "Density",
+    fill = NULL 
+  ) +
+  theme(
+    plot.margin = margin(t = 10, r = 20, b = 10, l = 20, unit = "pt"),
+    panel.spacing.x = unit(2, "lines"),
+    panel.spacing.y = unit(1.5, "lines"),
+    legend.position = "bottom",
+    legend.text = element_text(size = 12),
+    legend.key.size = unit(1.2, "lines"),
+    legend.margin = margin(t = -5),
+    strip.background = element_rect(fill = "white", 
+                                    color = "black", linewidth = 0.5),
+    strip.text = element_text(face = "bold", size = 12),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "black", linewidth = 0.5),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(face = "bold")
+  )
+p
+ggsave("Figure3.png", plot = p, width = 8, height = 6, dpi = 600)
+```
+
+## 3. Pre-Simulation Setup
+
+```{r}
+library(nhanesA)        # For fetching empirical NHANES data
+set.seed(2026)
+
+# NHANES 2017-2018 (J-Cycle) datasets
+demo_data <- nhanes("DEMO_J") # Demographics (Age, Gender, Income)
+bmx_data  <- nhanes("BMX_J")  # Field Body Measures (BMI)
+dxx_data  <- nhanes("DXX_J")  # Clinical DXA Scans (Total Body Fat %)
+
+nhanes_pop <- demo_data %>%
+ inner_join(bmx_data, by = "SEQN") %>%
+ inner_join(dxx_data, by = "SEQN") %>%
+ dplyr::select(SEQN, RIDAGEYR, RIAGENDR, INDFMPIR, BMXBMI, DXDTOPF) %>%
+ filter(RIDAGEYR >= 20, !is.na(BMXBMI), !is.na(DXDTOPF), 
+        !is.na(INDFMPIR)) %>%
+ mutate(RIAGENDRFemale = ifelse(RIAGENDR == "Female", 1, 0))
+
+# Oracle outcome model 
+oracle_model <- lm(DXDTOPF ~ BMXBMI + I(BMXBMI^2) + RIDAGEYR + 
+                    RIAGENDRFemale + BMXBMI:RIDAGEYR, 
+                   data = nhanes_pop)
+
+# Oracle estimates (Ground Truth Beta Vector)
+print(coef(oracle_model))
+# Oracle Residual Standard Error (Sigma)
+summary(oracle_model)$sigma
+
+# Latent Mismatch model parameters and generating correlation
+# Scale covariates (for numerical stability)
+nhanes_pop$Age_S <- as.numeric(scale(nhanes_pop$RIDAGEYR))
+nhanes_pop$Inc_S <- as.numeric(scale(nhanes_pop$INDFMPIR))
+
+gamma_female <- 1.50   # Females have higher mismatch rates
+gamma_inc    <- -1.00  # Higher income lowers mismatch rate
+gamma_Z      <- -2.50  # Protective effect of fastLink probability
+gamma_age    <- 0.00   # Placeholder
+
+target_rates <- c(0.05, 0.15, 0.30, 0.50)
+target_N <- nrow(nhanes_pop)
+gamma_0_calibrated <- numeric(length(target_rates))
+
+mapped_cohorts <- list()
+
+for(i in seq_along(target_rates)) {
+ rate <- target_rates[i]
+ rate_name <- paste0("Rate_", rate)
+ 
+ # adding a constant intercept does not change rank order
+ logit_env <- (gamma_female * nhanes_pop$RIAGENDRFemale) + (gamma_inc * nhanes_pop$Inc_S)
+ # Add noise to create a continuous ranking vector.
+ copula_score <- logit_env + rnorm(target_N, mean = 0, sd = 1.5)
+ # Attach scores and sort NHANES descending (Highest risk at the top)
+ current_nhanes <- nhanes_pop %>%
+  mutate(Logit_Env = logit_env, Copula_Score = copula_score) %>%
+  arrange(desc(Copula_Score))
+ # Sort part 2 GeCo data ascending (Worst matching probability at the top)
+ current_geco <- linkage_posteriors_list[[rate_name]] %>%
+  arrange(Z_FL)
+ 
+ # High Score -> Low Z_FL
+ mapped_df <- bind_cols(current_nhanes, current_geco) %>%
+  rename(m_i_true = is_true_mismatch)
+ 
+ # calibrate intercept g0
+ obj_function <- function(g0) {
+  pi_vec <- plogis(g0 + (gamma_Z * mapped_df$Z_FL) + 
+                    (gamma_female * mapped_df$RIAGENDRFemale) + 
+                    (gamma_inc * mapped_df$Inc_S))
+  return(mean(pi_vec) - rate)
+ }
+ g0_opt <- uniroot(obj_function, interval = c(-15, 15))$root
+ gamma_0_calibrated[i] <- g0_opt
+ 
+ mapped_cohorts[[rate_name]] <- mapped_df
+ 
+ cat(sprintf(" Target Rate: %.2f (Baseline Spearman's rho: %.2f)\n", 
+             rate, cor(mapped_df$Copula_Score, mapped_df$Z_FL,
+                       method="spearman")))
+}
+
+names(gamma_0_calibrated) <- paste0("Rate_", target_rates)
+
+# See the dynamically calibrated intercepts for the DGP
+# Multiply by -1 to align with the framework's P(m=0) parameterization
+true_gamma_int <- -1 * gamma_0_calibrated
+
+# Display the true intercepts for the 5%, 15%, 30%, and 50% cohorts
+print(true_gamma_int)
+
+# SAVE RESULTS FOR SIMULATION
+save(mapped_cohorts,
+     oracle_model,
+     gamma_female,
+     gamma_age,
+     gamma_inc,
+     gamma_Z,             
+     gamma_0_calibrated,
+     file = "part1.RData")
+```
+
+## 4. Simulation Loop
+
+### HPC Script
+
+```{bash eval = FALSE}
+#!/bin/bash
+#SBATCH --job-name=plda_sim
+#SBATCH --output=logs/sim_%A_%a.out
+#SBATCH --error=logs/sim_%A_%a.err
+#SBATCH --cpus-per-task=1
+#SBATCH --time=12:00:00        
+#SBATCH --mem-per-cpu=8G            
+#SBATCH --array=1-160           
+#SBATCH -p standard
+
+module load goolf R  
+
+mkdir -p sim_results
+
+Rscript part2_code.R $SLURM_ARRAY_TASK_ID
+```
+
+### R Script
+
+```{r eval = FALSE}
+.libPaths("~/R/hpc_libs")
+
+library(dplyr)
+library(pldamixture)
+
+out_dir <- "sim_results"
+
+if (!dir.exists(out_dir)) {
+ dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+}
+
+args <- commandArgs(trailingOnly = TRUE)
+array_id <- as.integer(args[1])
+
+if (is.na(array_id) || length(array_id) == 0) {
+ array_id <- 1
+}
+set.seed(2026 + array_id)
+
+load("part1.RData")
+
+# #########################################################################
+# The proposed approach - Exact Version (Adj*)
+# #########################################################################
+
+adj_fun_exact <- function(X, yperm, Delta) {
+ n <- nrow(X)
+ 
+ sv_fun <- function(betahat, stdhat, gammahat) {
+  muhat <- as.vector(X %*% betahat)
+  hs <- as.vector(plogis(Delta %*% gammahat))
+  one_minus_hs <- 1 - hs
+  sumhs <- sum(one_minus_hs)
+  sumhs_safe <- pmax(sumhs, 1E-300)
+  w <- tcrossprod(one_minus_hs) / sumhs_safe
+  diag(w) <- hs + (one_minus_hs ^ 2) / sumhs_safe
+  phi <- dnorm(matrix(yperm, n, n) - matrix(muhat, n, n, byrow = TRUE), 
+               sd = stdhat)
+  w_phi <- w * phi
+  sumphi <- rowSums(w_phi)
+  return(
+   list(
+    muhat = muhat,
+    hs = hs,
+    sumhs = sumhs,
+    stdhat = stdhat,
+    w = w,
+    phi = phi,
+    w_phi = w_phi,
+    sumphi = sumphi
+   )
+  )
+ }
+ 
+ obj_fun <- function(thetahat) {
+  sv <- sv_fun(thetahat[1:ncol(X)], thetahat[(ncol(X) + 1)], thetahat[(ncol(X) + 2):(length(thetahat))])
+  return(sum(-log(pmax(sv$sumphi, 1E-300))))
+ }
+ 
+ grad_fun <- function(thetahat) {
+  betahat <- thetahat[1:ncol(X)]
+  stdhat <- thetahat[(ncol(X) + 1)]
+  gammahat <- thetahat[(ncol(X) + 2):(length(thetahat))]
+  sv <- sv_fun(betahat, stdhat, gammahat)
+  dbeta <- t(-1 / sv$sumphi) %*%
+   ((sv$w * sv$phi * (
+    matrix(yperm, n, n) -
+     matrix(sv$muhat, n, n, byrow = TRUE)
+   ) / stdhat ^ 2) %*% X)
+  dsigma <- t(-1 / sv$sumphi) %*%
+   rowSums(sv$w * sv$phi * ((
+    matrix(yperm, n, n) -
+     matrix(sv$muhat, n, n, byrow = TRUE)
+   ) ^ 2 / stdhat ^ 3 -
+    1 / stdhat))
+  dw <- numeric(ncol(Delta))
+  for (i in 1:ncol(Delta)) {
+   dpi <- c(Delta[, i] * exp(Delta %*% gammahat) / 
+             (1 + exp(Delta %*% gammahat)) ^2)
+   sumdpi <- sum(-dpi)
+   dpij <- outer(sv$hs, dpi, "*") + outer(dpi, sv$hs, "*")
+   dwij <- (sv$sumhs * (-(outer(dpi, dpi, "+")) + dpij) -
+             sumdpi * (1 - (outer(sv$hs, sv$hs, "+")) +
+                        outer(sv$hs, sv$hs, "*"))) / sv$sumhs ^ 2
+   diag(dwij) <- diag(dwij) + dpi
+   dw[i] <- t(-1 / sv$sumphi) %*% rowSums(sv$phi * dwij)
+  }
+  return(c(dbeta, dsigma, dw))
+ }
+ 
+ maxiter <- 1000
+ tol <- 1E-4
+ iter <- 1
+ betahat <- solve(crossprod(X), crossprod(X, yperm))
+ gammahat <- rep(0, ncol(Delta))
+ stdhat <- sqrt(sum((yperm - X %*% betahat) ^ 2) / (n - ncol(X)))
+ 
+ sv <- sv_fun(betahat, stdhat, gammahat)
+ objs <- numeric(maxiter)
+ objs[iter] <- sum(-log(pmax(sv$sumphi, 1E-300)))
+ 
+ while (iter < maxiter) {
+  lhat <- sv$w_phi / pmax(sv$sumphi, 1E-300)
+  
+  diag_lhat <- diag(lhat)
+  rowSums_lhat <- rowSums(lhat)
+  colSums_lhat <- colSums(lhat)
+  y_weighted <- as.vector(crossprod(lhat, yperm))
+  
+  betahat <- as.vector(solve(crossprod(X, colSums_lhat * X), 
+                             crossprod(X, y_weighted)))
+  muhat <- as.vector(X %*% betahat)
+  var_term <- sum(rowSums_lhat * yperm ^ 2) - 2 * sum(muhat * y_weighted) +
+   sum(colSums_lhat * muhat ^ 2)
+  stdhat <- max(sqrt(var_term / sum(rowSums_lhat)), 1E-4)
+  
+  fn <- function(gammaval) {
+   hs_tmp <- as.vector(plogis(Delta %*% gammaval))
+   sumhs_tmp <- sum(1 - hs_tmp)
+   w_ii <- hs_tmp + ((1 - hs_tmp) ^ 2) / pmax(sumhs_tmp, 1E-300)
+   log_w_ii <- log(pmax(w_ii, 1E-300))
+   log_1_minus_hs <- log(pmax(1 - hs_tmp, 1E-300))
+   log_sumhs <- log(pmax(sumhs_tmp, 1E-300))
+   term1 <- sum(diag_lhat * log_w_ii)
+   term2 <- sum((rowSums_lhat - diag_lhat) * log_1_minus_hs)
+   term3 <- sum((colSums_lhat - diag_lhat) * log_1_minus_hs)
+   term4 <- sum(rowSums_lhat - diag_lhat) * log_sumhs
+   return(-(term1 + term2 + term3 - term4))
+  }
+  gammahat <- optim(gammahat, fn, method = "BFGS")$par
+  
+  sv <- sv_fun(betahat, stdhat, gammahat)
+  iter <- iter + 1
+  objs[iter] <- sum(-log(pmax(sv$sumphi, 1E-300)))
+  if (objs[iter] + tol > objs[iter - 1])
+   break
+ }
+ 
+ hess <- optimHess(par = c(betahat, stdhat, gammahat),
+                   fn = obj_fun,
+                   gr = grad_fun)
+ return(
+  list(
+   betahat = betahat,
+   gammahat = gammahat,
+   stdhat = stdhat,
+   se = sqrt(diag(solve(hess))),
+   objective = objs[1:iter]
+  )
+ )
+}
+
+# #########################################################################
+# Model Wrappers
+# #########################################################################
+
+format_res <- function(meth,
+                       tgt,
+                       rep,
+                       rlz_rate,
+                       b,
+                       se_b,
+                       sig,
+                       se_sig,
+                       g_names,
+                       g_vals,
+                       se_g_vals,
+                       r_time) {
+ out <- list(
+  Method = meth,
+  Target_Rate = tgt,
+  Replication = rep,
+  Realized_Rate = rlz_rate,
+  Run_Time = r_time,
+  Est_BetaInt = b[1],
+  Est_BetaBMI = b[2],
+  Est_BetaBMI2 = b[3],
+  Est_BetaAge = b[4],
+  Est_BetaGender = b[5],
+  Est_BetaBMIAge = b[6],
+  SE_BetaInt = se_b[1],
+  SE_BetaBMI = se_b[2],
+  SE_BetaBMI2 = se_b[3],
+  SE_BetaAge = se_b[4],
+  SE_BetaGender = se_b[5],
+  SE_BetaBMIAge = se_b[6],
+  Est_Sigma = sig,
+  SE_Sigma = se_sig
+ )
+ for (i in seq_along(g_names)) {
+  out[[paste0("Est_Gamma_", g_names[i])]] <- g_vals[i]
+  out[[paste0("SE_Gamma_", g_names[i])]] <- se_g_vals[i]
+ }
+ return(as.data.frame(out))
+}
+
+run_lm <- function(form, dat, name, tgt, rep, rlz_rate) {
+ t0 <- Sys.time()
+ mod <- do.call(lm, list(formula = form, data = dat))
+ t1 <- Sys.time()
+ r_time <- as.numeric(difftime(t1, t0, units = "secs"))
+ 
+ b <- coef(mod)
+ se_b <- summary(mod)$coefficients[, "Std. Error"]
+ sig <- summary(mod)$sigma
+ se_sig <- sqrt(2 * sig ^ 4 / mod$df.residual) / (2 * sig)
+ format_res(
+  name,
+  tgt,
+  rep,
+  rlz_rate,
+  b,
+  se_b,
+  sig,
+  se_sig,
+  character(0),
+  numeric(0),
+  numeric(0),
+  r_time
+ )
+}
+
+run_plda <- function(form,
+                     dat,
+                     mform,
+                     mr,
+                     name,
+                     tgt,
+                     rep,
+                     rlz_rate,
+                     g_names) {
+ t0 <- Sys.time()
+ tryCatch({
+  args_list <- list(formula = form,
+                    data = as.data.frame(dat),
+                    mformula = mform)
+  if (!is.null(mr))
+   args_list$mrate <- mr
+  mod <- do.call(pldamixture::fit_mixture, args_list)
+  t1 <- Sys.time()
+  
+  b <- mod$coefficients
+  sig <- sqrt(mod$dispersion)
+  g <- mod$m.coefficients
+  se_all <- mod$standard.errors
+  se_b <- se_all[1:6]
+  se_sig <- se_all[7] / (2 * sig)
+  se_g <- se_all[8:length(se_all)]
+  
+  format_res(name,
+             tgt,
+             rep,
+             rlz_rate,
+             b,
+             se_b,
+             sig,
+             se_sig,
+             g_names,
+             g,
+             se_g,
+             as.numeric(difftime(t1, t0, units = "secs")))
+ }, error = function(e) {
+  message(paste("Error in", name, ":", e$message))
+  data.frame(
+   Method = name,
+   Target_Rate = tgt,
+   Replication = rep,
+   Realized_Rate = rlz_rate
+  )
+ })
+}
+
+run_adj <- function(X, y, D, name, tgt, rep, rlz_rate, g_names) {
+ t0 <- Sys.time()
+ tryCatch({
+  mod <- adj_fun_exact(X, y, D)
+  t1 <- Sys.time()
+  
+  b <- mod$betahat
+  sig <- mod$stdhat
+  g <- mod$gammahat
+  se_b <- mod$se[1:6]
+  se_sig <- mod$se[7]
+  se_g <- mod$se[8:length(mod$se)]
+  
+  format_res(name,
+             tgt,
+             rep,
+             rlz_rate,
+             b,
+             se_b,
+             sig,
+             se_sig,
+             g_names,
+             g,
+             se_g,
+             as.numeric(difftime(t1, t0, units = "secs")))
+ }, error = function(e) {
+  message(paste("Error in", name, ":", e$message))
+  data.frame(
+   Method = name,
+   Target_Rate = tgt,
+   Replication = rep,
+   Realized_Rate = rlz_rate
+  )
+ })
+}
+
+# #########################################################################
+# 1k replicate loop
+# #########################################################################
+
+n_reps_per_job <- 25
+total_chunks_per_rate <- 40
+target_rates <- c(0.05, 0.15, 0.30, 0.50)
+
+rate_idx  <- floor((array_id - 1) / total_chunks_per_rate) + 1
+chunk_idx <- ((array_id - 1) %% total_chunks_per_rate) + 1
+
+rate <- target_rates[rate_idx]
+rate_name <- paste0("Rate_", rate)
+
+start_rep <- (chunk_idx - 1) * n_reps_per_job + 1
+end_rep   <- chunk_idx * n_reps_per_job
+
+form_ora  <- as.formula("DXDTOPF ~ BMXBMI + I(BMXBMI^2) + RIDAGEYR +
+                        RIAGENDRFemale + BMXBMI:RIDAGEYR")
+form_naiv <- as.formula("Y_perm  ~ BMXBMI + I(BMXBMI^2) + RIDAGEYR +
+                        RIAGENDRFemale + BMXBMI:RIDAGEYR")
+
+cat(
+ sprintf(
+  "\n Array ID: %d , Rate: %.2f , Chunk: %d (Trials %d-%d) \n",
+  array_id,
+  rate,
+  chunk_idx,
+  start_rep,
+  end_rep
+ )
+)
+
+smp_rate <- mapped_cohorts[[rate_name]]
+n_sample <- nrow(smp_rate)
+g0_dgp <- gamma_0_calibrated[[rate_name]]
+
+smp_rate <- smp_rate %>%
+ mutate(
+  logit_pi = g0_dgp + (gamma_Z * Z_FL) + (gamma_female * RIAGENDRFemale) +
+   (gamma_inc * Inc_S),
+  pi_i = plogis(logit_pi)
+ )
+
+X_mat <- model.matrix( ~ BMXBMI + I(BMXBMI ^ 2) + RIDAGEYR +
+                        RIAGENDRFemale + BMXBMI:RIDAGEYR,
+                       data = smp_rate)
+
+D_1 <- model.matrix( ~ 1, data = smp_rate)
+D_2 <- model.matrix( ~ Z_FL, data = smp_rate)
+D_3 <- model.matrix( ~ Z_FL + RIAGENDRFemale + Inc_S, data = smp_rate)
+D_4 <- model.matrix( ~ RIAGENDRFemale + Inc_S, data = smp_rate)
+D_5 <- model.matrix( ~ RIAGENDRFemale, data = smp_rate)
+
+all_reps_results <- list()
+
+for (rep_id in start_rep:end_rep) {
+ cat(sprintf("Trial: %d \n", rep_id))
+ 
+ smp_trial <- smp_rate
+ smp_trial$Y_perm <- smp_trial$DXDTOPF
+ 
+ smp_trial$m_i <- rbinom(n_sample, size = 1, prob = smp_trial$pi_i)
+ shuffled_ix <- which(smp_trial$m_i == 1)
+ 
+ if (length(shuffled_ix) > 1) {
+  smp_trial$Y_perm[shuffled_ix] <- smp_trial$Y_perm[c(shuffled_ix[-1], shuffled_ix[1])]
+ }
+ rlz_rate <- mean(smp_trial$m_i)
+ Y_corr <- smp_trial$Y_perm
+ 
+ res_reps <- list()
+ 
+ # Baselines
+ res_reps[[1]] <- run_lm(form_ora, smp_trial, "Oracle", rate, rep_id,
+                         rlz_rate)
+ res_reps[[2]] <- run_lm(form_naiv, smp_trial, "Naive", rate, rep_id,
+                         rlz_rate)
+ 
+ # Plain Adjustments (pldamixture)
+ res_reps[[3]] <- run_plda(
+  form_naiv,
+  smp_trial,
+  as.formula("~ 1"),
+  NULL,
+  "Plain_1_Int",
+  rate,
+  rep_id,
+  rlz_rate,
+  c("Int")
+ )
+ res_reps[[4]] <- run_plda(
+  form_naiv,
+  smp_trial,
+  as.formula("~ 1"),
+  rlz_rate,
+  "Plain_1c_IntConst",
+  rate,
+  rep_id,
+  rlz_rate,
+  c("Int")
+ )
+ res_reps[[5]] <- run_plda(
+  form_naiv,
+  smp_trial,
+  as.formula("~ Z_FL"),
+  NULL,
+  "Plain_2_Z",
+  rate,
+  rep_id,
+  rlz_rate,
+  c("Int", "ZFL")
+ )
+ res_reps[[6]] <- run_plda(
+  form_naiv,
+  smp_trial,
+  as.formula("~ Z_FL + RIAGENDRFemale + Inc_S"),
+  NULL,
+  "Plain_3_ZFemInc",
+  rate,
+  rep_id,
+  rlz_rate,
+  c("Int", "ZFL", "Female", "Inc")
+ )
+ res_reps[[7]] <- run_plda(
+  form_naiv,
+  smp_trial,
+  as.formula("~ RIAGENDRFemale + Inc_S"),
+  NULL,
+  "Plain_4_FemInc",
+  rate,
+  rep_id,
+  rlz_rate,
+  c("Int", "Female", "Inc")
+ )
+ res_reps[[8]] <- run_plda(
+  form_naiv,
+  smp_trial,
+  as.formula("~ RIAGENDRFemale"),
+  NULL,
+  "Plain_5_Fem",
+  rate,
+  rep_id,
+  rlz_rate,
+  c("Int", "Female")
+ )
+ 
+ # Proposed Adjustments
+ res_reps[[9]]  <- run_adj(X_mat,
+                           Y_corr,
+                           D_1,
+                           "Prop_1_Int",
+                           rate,
+                           rep_id,
+                           rlz_rate,
+                           c("Int"))
+ res_reps[[10]] <- run_adj(X_mat,
+                           Y_corr,
+                           D_2,
+                           "Prop_2_Z",
+                           rate,
+                           rep_id,
+                           rlz_rate,
+                           c("Int", "ZFL"))
+ res_reps[[11]] <- run_adj(
+  X_mat,
+  Y_corr,
+  D_3,
+  "Prop_3_ZFemInc",
+  rate,
+  rep_id,
+  rlz_rate,
+  c("Int", "ZFL", "Female", "Inc")
+ )
+ res_reps[[12]] <- run_adj(X_mat,
+                           Y_corr,
+                           D_4,
+                           "Prop_4_FemInc",
+                           rate,
+                           rep_id,
+                           rlz_rate,
+                           c("Int", "Female", "Inc"))
+ res_reps[[13]] <- run_adj(X_mat,
+                           Y_corr,
+                           D_5,
+                           "Prop_5_Fem",
+                           rate,
+                           rep_id,
+                           rlz_rate,
+                           c("Int", "Female"))
+ 
+ all_reps_results[[length(all_reps_results) + 1]] <- bind_rows(res_reps)
+}
+
+results_df <- bind_rows(all_reps_results)
+out_file <- file.path(out_dir,
+                      sprintf("part2_results_rate%02d_chunk%02d.rds", rate_idx, chunk_idx))
+saveRDS(results_df, file = out_file)
+cat(sprintf(
+ "Array %02d Task Complete. Results saved to '%s'.\n",
+ array_id,
+ out_file
+))
+```
+
+## 5. Evaluation of Results
+
+```{r results='asis'}
+library(dplyr)
+library(tidyr)
+library(kableExtra)
+library(ggplot2)
+library(ggh4x)
+library(ggtext)
+library(ggmagnify)
+
+load("part1.RData")
+out_dir <- "sim_results"
+result_files <- list.files(path = out_dir,
+                           pattern = "^part2_results_rate[0-9]+_chunk[0-9]+\\.rds$",
+                           full.names = TRUE)
+final_sim_results <- bind_rows(lapply(result_files, readRDS))
+
+cat(sprintf(
+ "Loaded %d total simulation trials.\n",
+ nrow(final_sim_results) / 13 / length(unique(final_sim_results$Target_Rate))
+))
+
+target_rates <- sort(unique(final_sim_results$Target_Rate))
+true_betas <- coef(oracle_model)
+true_sigma <- summary(oracle_model)$sigma
+true_g_female <- -gamma_female
+true_g_inc    <- -gamma_inc
+true_g_Z      <- -gamma_Z
+
+tval <- qt(0.975, df = 1987)
+
+
+#### Calculate Predictor-Level RMSE Post-Hoc ###
+final_sim_results_with_rmse <- list()
+
+for (tr in unique(final_sim_results$Target_Rate)) {
+ # Reconstruct X matrix for this specific cohort
+ rate_name <- paste0("Rate_", tr)
+ smp_rate <- mapped_cohorts[[rate_name]]
+ X_mat <- model.matrix( ~ BMXBMI + I(BMXBMI ^ 2) + RIDAGEYR +
+                         RIAGENDRFemale + BMXBMI:RIDAGEYR,
+                        data = smp_rate)
+ 
+ # Oracle linear predictor: X * Beta_true
+ lp_true <- as.vector(X_mat %*% true_betas)
+ 
+ # Subset trials for this rate
+ df_tr <- final_sim_results %>% filter(Target_Rate == tr)
+ 
+ # Extract estimated Betas (Trials x Parameters matrix)
+ B_mat <- as.matrix(
+  df_tr %>% dplyr::select(
+   Est_BetaInt,
+   Est_BetaBMI,
+   Est_BetaBMI2,
+   Est_BetaAge,
+   Est_BetaGender,
+   Est_BetaBMIAge
+  )
+ )
+ 
+ # Compute estimated linear predictors (Trials x Observations)
+ lp_est <- B_mat %*% t(X_mat)
+ 
+ # Calculate RMSE: sqrt(mean((lp_est - lp_true)^2)) for each trial
+ df_tr$Pred_RMSE <- sqrt(rowMeans(sweep(lp_est, 2, lp_true, "-") ^ 2))
+ 
+ final_sim_results_with_rmse[[length(final_sim_results_with_rmse) + 1]] <- df_tr
+}
+
+final_sim_results <- bind_rows(final_sim_results_with_rmse)
+
+# #########################################################################
+# Realized Mismatch Rate
+# #########################################################################
+
+mismatch_data <- final_sim_results %>%
+ distinct(Target_Rate, Replication, Realized_Rate) %>%
+ mutate(Target_Rate_Factor = factor(Target_Rate, levels = target_rates))
+
+mismatch_summary <- mismatch_data %>%
+ group_by(Target_Rate) %>%
+ summarise(
+  Min = min(Realized_Rate),
+  Q1 = quantile(Realized_Rate, 0.25),
+  Median = median(Realized_Rate),
+  Mean = mean(Realized_Rate),
+  Q3 = quantile(Realized_Rate, 0.75),
+  Max = max(Realized_Rate),
+  .groups = 'drop'
+ )
+
+mismatch_summary %>%
+ kable(
+  format = "latex",
+  booktabs = TRUE,
+  digits = 4,
+  caption = "Summary of Observed Mismatch Rates Across Trials"
+ ) %>%
+ kable_styling(latex_options = c("striped", "hold_position"),
+               full_width = FALSE)
+
+ggplot(
+ mismatch_data,
+ aes(x = Target_Rate_Factor, y = Realized_Rate, fill = Target_Rate_Factor)
+) +
+ geom_boxplot(
+  alpha = 0.8,
+  outlier.color = "red",
+  outlier.size = 2,
+  outlier.shape = 16
+ ) +
+ theme_minimal(base_size = 14) +
+ labs(title = "Distribution of Observed Mismatch Rates", x = "Target Mismatch Rate", y = "Realized Mismatch Rate") +
+ scale_fill_brewer(palette = "Blues") +
+ theme(legend.position = "none",
+       plot.title = element_text(face = "bold"))
+
+
+# #########################################################################
+# Metrics Across Replications (Unified for Betas, Sigma, and Gammas)
+# #########################################################################
+
+eval_df <- final_sim_results %>%
+ pivot_longer(
+  cols = -c(Method, Target_Rate, Replication, Realized_Rate, Run_Time),
+  names_to = c(".value", "Parameter"),
+  names_pattern = "^(Est|SE)_(.*)$"
+ ) %>%
+ filter(!is.na(Parameter))
+
+truth_map <- data.frame(
+ Parameter = c(
+  "BetaInt",
+  "BetaBMI",
+  "BetaBMI2",
+  "BetaAge",
+  "BetaGender",
+  "BetaBMIAge",
+  "Sigma",
+  "Gamma_ZFL",
+  "Gamma_Female",
+  "Gamma_Inc"
+ ),
+ Truth = c(
+  true_betas["(Intercept)"],
+  true_betas["BMXBMI"],
+  true_betas["I(BMXBMI^2)"],
+  true_betas["RIDAGEYR"],
+  true_betas["RIAGENDRFemale"],
+  true_betas["BMXBMI:RIDAGEYR"],
+  true_sigma,
+  true_g_Z,
+  true_g_female,
+  true_g_inc
+ )
+)
+
+eval_df <- eval_df %>%
+ left_join(truth_map, by = "Parameter") %>%
+ mutate(
+  Truth = ifelse(Parameter == "Gamma_Int", -gamma_0_calibrated[paste0("Rate_", Target_Rate)], Truth),
+  Trial_Bias = Est - Truth,
+  Trial_SqErr   = (Est - Truth) ^ 2,
+  Trial_RB      = ifelse(Truth == 0, Est - Truth, (Est - Truth) / abs(Truth)),
+  Covered       = (Truth >= (Est - tval * SE)) &
+   (Truth <= (Est + tval * SE))
+ )
+
+polished_table <- eval_df %>%
+ group_by(Target_Rate, Method, Parameter) %>%
+ summarise(
+  ConvRate  = mean(!is.na(Est) & !is.na(SE)),
+  Mean_Est  = mean(Est, na.rm = TRUE),
+  Mean_SE   = mean(SE, na.rm = TRUE),
+  Bias   = mean(Trial_Bias, na.rm = TRUE),
+  RB        = mean(Trial_RB, na.rm = TRUE),
+  SD        = sd(Est, na.rm = TRUE),
+  RMSE      = sqrt(mean(Trial_SqErr, na.rm = TRUE)),
+  CR        = mean(Covered, na.rm = TRUE),
+  Mean_Time = mean(Run_Time, na.rm = TRUE),
+  .groups   = 'drop'
+ )
+
+unique_methods <- unique(polished_table$Method)
+dynamic_methods <- sort(setdiff(unique_methods, c("Oracle", "Naive")))
+method_levels <- c("Oracle", "Naive", dynamic_methods)
+
+param_levels <- c(
+ "BetaInt",
+ "BetaBMI",
+ "BetaBMI2",
+ "BetaAge",
+ "BetaGender",
+ "BetaBMIAge",
+ "Sigma",
+ "Gamma_Int",
+ "Gamma_ZFL",
+ "Gamma_Female",
+ "Gamma_Inc"
+)
+
+polished_table$Method <- factor(polished_table$Method, levels = method_levels)
+polished_table$Parameter <- factor(polished_table$Parameter, levels = param_levels)
+
+options(knitr.kable.NA = '-')
+
+model_level <- polished_table %>%
+ group_by(Target_Rate, Method) %>%
+ summarise(
+  ConvRate = max(ConvRate, na.rm = TRUE),
+  Mean_Time = max(Mean_Time, na.rm = TRUE),
+  .groups = 'drop'
+ )
+
+param_level <- polished_table %>%
+ dplyr::select(Target_Rate,
+               Method,
+               Parameter,
+               Mean_Est,
+               Mean_SE,
+               Bias,
+               RB,
+               SD,
+               RMSE,
+               CR) %>%
+ pivot_wider(
+  names_from = Parameter,
+  values_from = c(Mean_Est, Mean_SE, Bias, RB, SD, RMSE, CR),
+  names_glue = "{Parameter}_{.value}"
+ )
+
+wide_table <- model_level %>%
+ left_join(param_level, by = c("Target_Rate", "Method"))
+
+math_map <- c(
+ "BetaInt"      = "$\\beta_{Int}$",
+ "BetaBMI"      = "$\\beta_{BMI}$",
+ "BetaBMI2"     = "$\\beta_{BMI^2}$",
+ "BetaAge"      = "$\\beta_{Age}$",
+ "BetaGender"   = "$\\beta_{Gender}$",
+ "BetaBMIAge"   = "$\\beta_{BMI:Age}$",
+ "Sigma"        = "$\\sigma$",
+ "Gamma_Int"    = "$\\gamma_{Int}$",
+ "Gamma_ZFL"    = "$\\gamma_{ZFL}$",
+ "Gamma_Female" = "$\\gamma_{Female}$",
+ "Gamma_Inc"    = "$\\gamma_{Inc}$"
+)
+
+for (tr in target_rates) {
+ df_tr <- wide_table %>% filter(Target_Rate == tr) %>%
+  dplyr::select(-Target_Rate) %>% arrange(Method)
+ 
+ idx_oracle <- which(df_tr$Method == "Oracle")
+ idx_naive  <- which(df_tr$Method == "Naive")
+ idx_props  <- which(grepl("^Prop_", df_tr$Method))
+ 
+ df_tr$Method <- gsub("_", "\\\\_", df_tr$Method)
+ 
+ all_params <- levels(polished_table$Parameter)
+ 
+ param_groups <- list(
+  "Outcome Model Parameters (Beta Part 1)" =
+   c("BetaInt", "BetaBMI", "BetaBMI2", "BetaAge"),
+  "Outcome Model Parameters (Beta Part 2 and Sigma)" =
+   c("BetaGender", "BetaBMIAge", "Sigma"),
+  "Mismatch Model Parameters (Gamma)" =
+   all_params[grep("Gamma", all_params)]
+ )
+ 
+ for (grp_name in names(param_groups)) {
+  params <- param_groups[[grp_name]]
+  
+  col_order <- c("Method", "ConvRate", "Mean_Time")
+  header_groups <- c(" " = 3)
+  
+  for (p in params) {
+   if (grepl("Gamma", p)) {
+    # Gammas (Table 6) as in original
+    p_cols <- paste0(p, c("_Mean_Est", "_Mean_SE", "_RB", "_SD", "_CR"))
+   } else {
+    # Betas & Sigma (Table 5) - Bias, SD, RMSE
+    p_cols <- paste0(p, c("_Bias", "_SD", "_RMSE"))
+   }
+   
+   existing_cols <- intersect(p_cols, names(df_tr))
+   if (length(existing_cols) > 0) {
+    col_order <- c(col_order, existing_cols)
+    vec <- length(existing_cols)
+    names(vec) <- math_map[p]
+    header_groups <- c(header_groups, vec)
+   }
+  }
+  
+  df_subset <- df_tr %>% dplyr::select(all_of(col_order))
+  
+  clean_names <- gsub("^.*_(Mean_Est|Mean_SE|Bias|RB|SD|RMSE|CR)$",
+                      "\\1",
+                      names(df_subset))
+  clean_names[clean_names == "Mean_Est"] <- "Est"
+  clean_names[clean_names == "Mean_SE"] <- "SE"
+  clean_names[clean_names == "Bias"] <- "Abs. Bias"
+  clean_names[clean_names == "RB"] <- "Rel. Bias"
+  clean_names[clean_names == "SD"] <- "SD"
+  clean_names[clean_names == "RMSE"] <- "RMSE"
+  clean_names[clean_names == "CR"] <- "CR"
+  clean_names[clean_names == "Mean_Time"] <- "Time (s)"
+  
+  k_tab <- kable(
+   df_subset,
+   format = "latex",
+   booktabs = TRUE,
+   digits = 3,
+   col.names = clean_names,
+   caption = sprintf("Target Mismatch Rate: %.2f - %s", tr, grp_name),
+   escape = FALSE,
+   align = "c"
+  ) %>%
+   kable_styling(
+    latex_options = c("striped", "hold_position", "scale_down"),
+    full_width = FALSE,
+    font_size = 10
+   ) %>%
+   add_header_above(header_groups, bold = TRUE, escape = FALSE) %>%
+   column_spec(1, bold = TRUE) %>%
+   landscape()
+  
+  if (length(idx_oracle) > 0)
+   k_tab <- k_tab %>% row_spec(idx_oracle, background = "#e6ffe6", bold = TRUE)
+  if (length(idx_naive) > 0)
+   k_tab <- k_tab %>% row_spec(idx_naive, background = "#ffe6e6")
+  if (length(idx_props) > 0)
+   k_tab <- k_tab %>% row_spec(idx_props, bold = TRUE)
+  
+  cat(k_tab, "\n\\newpage\n")
+ }
+}
+```
+
+```{r fig.height=9, fig.width=14}
+df <- data.frame(
+ coef = rep(c(
+  "Beta_BMI", "Beta_Age", "Beta_Gender", "Sigma"
+ ), each = 16),
+ group = rep(rep(c(
+  "0.05", "0.15", "0.30", "0.50"
+ ), each = 4), 4),
+ method = rep(c("Naive", "Adj_Int", "Adj_Full", "Adj_Prop"), 16),
+ 
+ y = c(
+  1.849,
+  2.003,
+  1.995,
+  2.007,
+  1.607,
+  2.002,
+  2.013,
+  2.033,
+  1.182,
+  1.999,
+  2.031,
+  2.065,
+  0.744,
+  1.929,
+  2.044,
+  2.140,
+  0.160,
+  0.189,
+  0.190,
+  0.191,
+  0.133,
+  0.209,
+  0.208,
+  0.205,
+  0.072,
+  0.225,
+  0.212,
+  0.211,-0.017,
+  0.167,
+  0.210,
+  0.203,
+  11.129,
+  11.550,
+  11.510,
+  11.467,
+  10.455,
+  11.743,
+  11.631,
+  11.512,
+  9.150,
+  11.830,
+  11.635,
+  11.436,
+  6.836,
+  12.398,
+  11.989,
+  11.709,
+  4.438,
+  3.805,
+  3.842,
+  3.838,
+  5.332,
+  3.815,
+  3.885,
+  3.853,
+  6.400,
+  3.847,
+  3.939,
+  3.888,
+  7.523,
+  3.908,
+  3.948,
+  3.902
+ ),
+ 
+ se = c(
+  0.104,
+  0.114,
+  0.113,
+  0.097,
+  0.117,
+  0.125,
+  0.118,
+  0.110,
+  0.140,
+  0.150,
+  0.133,
+  0.125,
+  0.170,
+  0.197,
+  0.117,
+  0.091,
+  0.037,
+  0.037,
+  0.037,
+  0.035,
+  0.038,
+  0.042,
+  0.039,
+  0.039,
+  0.050,
+  0.047,
+  0.044,
+  0.047,
+  0.052,
+  0.080,
+  0.060,
+  0.066,
+  0.201,
+  0.190,
+  0.186,
+  0.185,
+  0.242,
+  0.213,
+  0.203,
+  0.199,
+  0.290,
+  0.261,
+  0.239,
+  0.224,
+  0.341,
+  0.430,
+  0.334,
+  0.273,
+  0.091,
+  0.085,
+  0.076,
+  0.071,
+  0.085,
+  0.103,
+  0.086,
+  0.078,
+  0.102,
+  0.125,
+  0.104,
+  0.092,
+  0.119,
+  0.188,
+  0.142,
+  0.118
+ )
+)
+
+df$lb <- df$y - tval * df$se
+df$ub <- df$y + tval * df$se
+
+df_hline <- data.frame(
+ coef = c("Beta_BMI", "Beta_Age", "Beta_Gender", "Sigma"),
+ oest = c(1.973, 0.178, 11.355, 3.913),
+ ose = c(0.092, 0.033, 0.178, 0.062)
+)
+df_hline$olb <- df_hline$oest - tval * df_hline$ose
+df_hline$oub <- df_hline$oest + tval * df_hline$ose
+
+df <- left_join(df, df_hline, by = "coef")
+df$group <- as.factor(df$group)
+df$method <- factor(df$method, levels = c("Naive", "Adj_Int", "Adj_Full", "Adj_Prop"))
+
+facet_labels <- c(
+ "Beta_Age" = "beta[Age]",
+ "Beta_BMI" = "beta[BMI]",
+ "Beta_Gender" = "beta[Gender]",
+ "Sigma" = "sigma"
+)
+
+x_labels <- c(
+ "Naive",
+ "Adj<sub>Int</sub>",
+ "Adj<sub>Full</sub>",
+ "Adj<sub>Prop</sub>"
+)
+
+cb_colors <- c(
+ "Naive"    = "#666666",
+ "Adj_Int"  = "#000000",
+ "Adj_Full" = "#000000",
+ "Adj_Prop" = "#D55E00"
+)
+
+cb_shapes <- c(
+ "Naive"    = 17,
+ "Adj_Int"  = 16,
+ "Adj_Full" = 15,
+ "Adj_Prop" = 18
+)
+
+cb_sizes  <- c(
+ "Naive"    = 3,
+ "Adj_Int"  = 3,
+ "Adj_Full" = 3,
+ "Adj_Prop" = 5.5
+)
+
+p <- ggplot(df, aes(
+ x = method,
+ y = y,
+ color = method,
+ shape = method,
+ size = method
+)) +
+ geom_hline(
+  data = df_hline,
+  aes(yintercept = oest),
+  col = "#009E73",
+  linewidth = 1.3
+ ) +
+ geom_hline(
+  data = df_hline,
+  aes(yintercept = olb),
+  col = "#009E73",
+  linetype = 2,
+  linewidth = 0.9
+ ) +
+ geom_hline(
+  data = df_hline,
+  aes(yintercept = oub),
+  col = "#009E73",
+  linetype = 2,
+  linewidth = 0.9
+ ) +
+ geom_rect(
+  aes(
+   xmin = -Inf,
+   xmax = Inf,
+   ymin = olb,
+   ymax = oub
+  ),
+  fill = "#009E73",
+  alpha = 0.08,
+  inherit.aes = FALSE
+ ) +
+ 
+ geom_errorbar(aes(ymin = lb, ymax = ub), width = 0.25, linewidth = 1.0) +
+ geom_point() +
+ 
+ scale_color_manual(values = cb_colors) +
+ scale_shape_manual(values = cb_shapes) +
+ scale_size_manual(values = cb_sizes) +
+ 
+ labs(title = "Target Mismatch Rate", x = "Method", y = "Parameter") +
+ theme_bw(base_size = 18) +
+ scale_x_discrete(labels = x_labels) +
+ scale_y_continuous(
+  breaks = scales::pretty_breaks(n = 4),
+  labels = function(x)
+   sprintf("%.2f", round(x, 2))
+ ) +
+ 
+ facet_grid2(
+  rows = vars(coef),
+  cols = vars(group),
+  independent = "y",
+  scale = "free_y",
+  switch = "y",
+  labeller = labeller(coef = as_labeller(facet_labels, label_parsed))
+ ) +
+ theme(
+  legend.position = "none",
+  strip.placement = "outside",
+  plot.title = element_text(
+   hjust = 0.5,
+   size = 22,
+   face = "bold",
+   margin = margin(b = 15)
+  ),
+  strip.background = element_rect(
+   fill = "#f0f0f0",
+   colour = "black",
+   linewidth = 1.2
+  ),
+  strip.text = element_text(size = 20),
+  panel.grid.major.x = element_blank(),
+  panel.grid.minor = element_blank(),
+  axis.text.x = element_markdown(size = 16, colour = "black", 
+                                 angle = 45, hjust = 1),
+  axis.text.y = element_text(size = 14, colour = "black"),
+  axis.title.x = element_text(
+   size = 20,
+   face = "bold",
+   margin = margin(t = 15)
+  ),
+  axis.title.y = element_text(
+   size = 20,
+   face = "bold",
+   margin = margin(r = 15)
+  ),
+  panel.spacing.y = unit(1.5, "lines"),
+  panel.spacing.x = unit(1, "lines"),
+  panel.border = element_rect(
+   colour = "black",
+   fill = NA,
+   linewidth = 1.2
+  )
+ )
+
+p_final <- p +
+ # 0.30 Sigma
+ geom_magnify(
+  data = df[df$coef == "Sigma" & df$group == "0.30", ],
+  from = c(
+   xmin = 1.8,
+   xmax = 4.2,
+   ymin = 3.65,
+   ymax = 4.15
+  ),
+  to = c(
+   xmin = 1.2,
+   xmax = 4.4,
+   ymin = 4.5,
+   ymax = 5.8
+  ),
+  shadow = FALSE,
+  colour = "black",
+  linewidth = 0.5,
+  proj.linetype = 3,
+  inset.linetype = 1,
+  fill = "white",
+  alpha = 1
+ ) +
+ # 0.50 Beta_Gender
+ geom_magnify(
+  data = df[df$coef == "Beta_Gender" & df$group == "0.50", ],
+  from = c(
+   xmin = 1.8,
+   xmax = 4.2,
+   ymin = 11.2,
+   ymax = 12.8
+  ),
+  to = c(
+   xmin = 1.2,
+   xmax = 4.4,
+   ymin = 7.6,
+   ymax = 10.4
+  ),
+  shadow = FALSE,
+  colour = "black",
+  linewidth = 0.5,
+  proj.linetype = 3,
+  inset.linetype = 1,
+  fill = "white",
+  alpha = 1
+ ) +
+ # 0.50 Sigma
+ geom_magnify(
+  data = df[df$coef == "Sigma" & df$group == "0.50", ],
+  from = c(
+   xmin = 1.8,
+   xmax = 4.2,
+   ymin = 3.65,
+   ymax = 4.25
+  ),
+  to = c(
+   xmin = 1.2,
+   xmax = 4.4,
+   ymin = 4.8,
+   ymax = 6.8
+  ),
+  shadow = FALSE,
+  colour = "black",
+  linewidth = 0.5,
+  proj.linetype = 3,
+  inset.linetype = 1,
+  fill = "white",
+  alpha = 1
+ )
+
+p_final
+ggsave(
+ "Figure4.pdf",
+ plot = p_final,
+ width = 14,
+ height = 9,
+ dpi = 600
+)
+```
+
+```{r results='asis'}
+# #########################################################################
+# RMSE Table and Visual Summary (Predictor & All Coefficients)
+# #########################################################################
+library(patchwork)
+
+# Setup target methods and formatting
+target_methods <- c("Naive", "Plain_1_Int", "Plain_3_ZFemInc", "Prop_3_ZFemInc")
+method_labels <- c("Naive",
+                   "Adj1 (Constant)",
+                   "Adj3 (Plain Covariates)",
+                   "Adj* (Proposed)")
+cb_colors <- c(
+ "Naive" = "#666666",
+ "Adj1 (Constant)" = "#56B4E9",
+ "Adj3 (Plain Covariates)" = "#E69F00",
+ "Adj* (Proposed)" = "#D55E00"
+)
+
+# Prepare Predictor-Level RMSE Data
+pred_rmse_df <- final_sim_results %>%
+ filter(Method %in% target_methods) %>%
+ group_by(Target_Rate, Method) %>%
+ summarise(RMSE = mean(Pred_RMSE, na.rm = TRUE), .groups = 'drop') %>%
+ mutate(Parameter = "Predictor")
+
+# Prepare Coefficient-Level RMSE Data (All Betas)
+beta_params <- c("BetaInt",
+                 "BetaBMI",
+                 "BetaBMI2",
+                 "BetaAge",
+                 "BetaGender",
+                 "BetaBMIAge")
+coef_rmse_df <- eval_df %>%
+ filter(Parameter %in% beta_params, Method %in% target_methods) %>%
+ group_by(Target_Rate, Method, Parameter) %>%
+ summarise(
+   RMSE = mean(abs(Trial_Bias), na.rm = TRUE),    
+   SD = sd(abs(Trial_Bias), na.rm = TRUE),        
+   .groups = 'drop'
+ ) %>%
+ mutate(Method = factor(Method, levels = method_levels))
+
+# Generate the RMSE Table
+rmse_table_data <- bind_rows(pred_rmse_df, coef_rmse_df) %>%
+ select(-any_of("SD")) %>% 
+ mutate(Method = factor(Method, levels = target_methods, labels = method_labels)) %>%
+ pivot_wider(names_from = Parameter, values_from = RMSE) %>%
+ arrange(Target_Rate, Method)
+
+# Print LaTeX Table
+cat("\n\n")
+rmse_table_data %>%
+ kable(
+  format = "latex",
+  booktabs = TRUE,
+  digits = 3,
+  col.names = c(
+   "Mismatch Rate",
+   "Method",
+   "Predictor",
+   "Intercept",
+   "BMI",
+   "BMI^2",
+   "Age",
+   "Gender",
+   "BMI:Age"
+  ),
+  caption = "Trial-Level Error Results (RMSE for Predictor, MAE for Coefficients)",
+  align = "llccccccc"
+ ) %>%
+ kable_styling(latex_options = c("striped", "hold_position", "scale_down")) %>%
+ print()
+cat("\n\n")
+```
+
+```{r fig.height=10, fig.width=14}
+# #########################################################################
+# Unified 3-Row RMSE Figure (High Contrast & Line Types)
+# #########################################################################
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+
+target_methods <- c("Plain_1_Int", "Plain_3_ZFemInc", "Prop_3_ZFemInc")
+method_levels <- c("Plain_1_Int", "Plain_3_ZFemInc", "Prop_3_ZFemInc")
+
+cb_colors <- c(
+ "Plain_1_Int" = "#56B4E9",      
+ "Plain_3_ZFemInc" = "#009E73",  
+ "Prop_3_ZFemInc" = "#D55E00"    
+)
+
+cb_shapes <- c(
+ "Plain_1_Int" = 16,     
+ "Plain_3_ZFemInc" = 15, 
+ "Prop_3_ZFemInc" = 18   
+)
+
+cb_linetypes <- c(
+ "Plain_1_Int" = "dotted",
+ "Plain_3_ZFemInc" = "dashed",
+ "Prop_3_ZFemInc" = "solid"
+)
+
+legend_labels <- c(
+ expression(Adj[Int]), 
+ expression(Adj[Full]), 
+ expression(Adj[Prop])
+)
+
+pred_rmse_df <- final_sim_results %>%
+ filter(Method %in% target_methods) %>%
+ group_by(Target_Rate, Method) %>%
+ summarise(
+    RMSE = mean(Pred_RMSE, na.rm = TRUE),
+    SD = sd(Pred_RMSE, na.rm = TRUE),      
+    .groups = 'drop'
+  ) %>%
+ mutate(Parameter = "Predictor",
+        Method = factor(Method, levels = method_levels))
+
+beta_params <- c("BetaInt", "BetaBMI", "BetaBMI2", 
+                 "BetaAge", "BetaGender", "BetaBMIAge", "Sigma")
+
+coef_rmse_df <- eval_df %>%
+ filter(Parameter %in% beta_params, Method %in% target_methods) %>%
+ group_by(Target_Rate, Method, Parameter) %>%
+ summarise(
+   RMSE = mean(abs(Trial_Bias), na.rm = TRUE),    
+   SD = sd(abs(Trial_Bias), na.rm = TRUE),        
+   .groups = 'drop'
+ ) %>%
+ mutate(Method = factor(Method, levels = method_levels))
+
+plot_rmse_panel <- function(param_name, title_expr, data, is_overall = FALSE) {
+  
+  if (is_overall) {
+    p_data <- data
+    y_lab <- expression(RMSE ~ (X*hat(beta) - X*beta^"*"))
+  } else {
+    p_data <- data %>% filter(Parameter == param_name)
+    if (param_name == "Sigma") {
+      y_lab <- expression(MAE ~ (hat(sigma)))
+    } else {
+      y_lab <- expression(MAE ~ (hat(beta)))
+    }
+  }
+  pd <- position_dodge(width = 0.3)
+  
+  p <- ggplot(p_data, aes(x = as.factor(Target_Rate), y = RMSE, 
+                          color = Method, group = Method, 
+                          shape = Method, linetype = Method))
+  
+  p <- p + geom_errorbar(aes(ymin = pmax(0, RMSE - SD), ymax = RMSE + SD), 
+                         width = 0.3, linewidth = 0.8, alpha = 0.6,
+                         linetype = "solid", position = pd, show.legend = FALSE)
+  
+  p <- p + geom_line(linewidth = 1.1, position = pd) +
+    geom_point(size = 3.8, position = pd) +
+    scale_color_manual(values = cb_colors, labels = legend_labels) +
+    scale_shape_manual(values = cb_shapes, labels = legend_labels) +
+    scale_linetype_manual(values = cb_linetypes, labels = legend_labels) +
+    scale_y_continuous(labels = function(x) round(x, 4)) + 
+    theme_bw(base_size = 14) +
+    labs(title = title_expr, y = y_lab) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+      axis.title.x = element_blank(), 
+      axis.text = element_text(color = "black"),
+      panel.grid.major = element_blank(), 
+      panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", linewidth = 1)
+    )
+  return(p)
+}
+
+p1 <- plot_rmse_panel("BetaInt", expression(beta[Int]), coef_rmse_df)
+p2 <- plot_rmse_panel("BetaBMI", expression(beta[BMI]), coef_rmse_df)
+p3 <- plot_rmse_panel("BetaBMI2", expression(beta[BMI^2]), coef_rmse_df)
+p4 <- plot_rmse_panel("BetaAge", expression(beta[Age]), coef_rmse_df)
+p5 <- plot_rmse_panel("BetaGender", expression(beta[Gender]), coef_rmse_df)
+p6 <- plot_rmse_panel("BetaBMIAge", expression(beta[BMI:Age]), coef_rmse_df)
+p7 <- plot_rmse_panel("Sigma", expression(sigma), coef_rmse_df)
+p8 <- plot_rmse_panel(NULL, "Overall Predictor", pred_rmse_df, is_overall = TRUE)
+
+p7 <- p7 + labs(x = "Target Mismatch Rate") + 
+ theme(axis.title.x = element_text(face = "bold", margin = margin(t = 10)))
+p8 <- p8 + labs(x = "Target Mismatch Rate") + 
+ theme(axis.title.x = element_text(face = "bold", margin = margin(t = 10)))
+
+# Combine via Patchwork
+# A B C -> Row 1 (Betas)
+# D E F -> Row 2 (Betas)
+# G H H -> Row 3 (Sigma + spanning Overall Predictor)
+layout_design <- "
+ABC
+DEF
+GHH
+"
+
+combined_rmse_plot <- p1 + p2 + p3 + p4 + p5 + p6 + p7 + p8 +
+ plot_layout(design = layout_design, guides = "collect") &
+ theme(
+  legend.position = "bottom",
+  legend.title = element_blank(),
+  legend.text = element_text(size = 18, margin = margin(r = 20)),
+  legend.key.width = unit(3, "lines")
+ )
+
+ggsave("Figure4_RMSE.pdf", plot = combined_rmse_plot, 
+       width = 14, height = 11, dpi = 600)
+```
+

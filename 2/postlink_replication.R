@@ -1,0 +1,356 @@
+## ----setup, include=FALSE----------------------------------------------------------------------------
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, 
+                      fig.width = 8, fig.height = 4.5, fig.align = "center")
+
+
+## ----libraries---------------------------------------------------------------------------------------
+#install.packages("postlink_0.1.2.tar.gz", repos = NULL, type = "source")
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(postlink)
+set.seed(2026)
+
+options(digits = 3)
+
+
+## ----load_data---------------------------------------------------------------------------------------
+# Load the simulated file from a linked data provider
+data("LD1000", package = "postlink")
+
+# Sample of the linked dataset LD1000 (Table 1 in manuscript)
+head(subset(LD1000, select = -c(True_Disease_Status, is_match)), n = 5)
+
+LD1000$BMI <- as.numeric(scale(LD1000$BMI)) 
+LD1000$Age <- as.numeric(scale(LD1000$Age))
+
+# global_mismatch_rate <- 0.3 
+# ~ mean(LD1000$block_mrate) & 1- mean(LD1000$is_match)
+
+
+## ----formula-----------------------------------------------------------------------------------------
+formula_sci <- Disease_Status ~ BMI + Age + Treatment
+
+
+## ----benchmarks--------------------------------------------------------------------------------------
+# 1. Oracle: Fit on the true, perfectly linked data
+fit_oracle <- glm(True_Disease_Status ~ BMI + Age + Treatment, 
+                  data = LD1000, family = "binomial")
+
+# 2. Naive: Fit on all linked data, ignoring potential mismatch error
+fit_naive <- glm(formula_sci, 
+                 data = LD1000, 
+                 family = "binomial")
+
+# 3. Naive (Safe Matches): Fit only on the safe matches
+fit_naive_safe <- glm(formula_sci, 
+                      data = subset(LD1000, safe_match == TRUE), 
+                      family = "binomial")
+
+
+## ----model4_ele--------------------------------------------------------------------------------------
+# Phase 1: Adjustment Specification
+adj_ele_audit <- adjELE(
+  linked.data = LD1000, 
+  m.rate = LD1000$block_mrate,
+  blocks = bm, 
+  audit.size = rep(20, length(unique(LD1000$bm))), 
+  weight.matrix = "BLUE"
+)
+print(adj_ele_audit)
+
+# Phase 2: Estimation & Inference
+fit_ele_audit <- plglm(
+  formula = formula_sci, 
+  family = "binomial", 
+  adjustment = adj_ele_audit
+)
+summary(fit_ele_audit)
+
+
+## ----models5_7_em------------------------------------------------------------------------------------
+# Model 5: EM Mixture Model (Global Rate Only)
+adj_em_rate <- adjMixture(
+  linked.data = LD1000, 
+  m.formula = ~ 1, 
+  m.rate = 0.3
+)
+print(adj_em_rate)
+
+fit_em_rate <- plglm(formula_sci, family = "binomial", adjustment = adj_em_rate)
+summary(fit_em_rate)
+
+# Model 6: EM Mixture Model (Safe Matches Only)
+adj_em_safe <- adjMixture(
+  linked.data = LD1000, 
+  m.formula = ~ 1, 
+  safe.matches = safe_match
+)
+print(adj_em_safe)
+
+fit_em_safe <- plglm(formula_sci, family = "binomial", adjustment = adj_em_safe)
+summary(fit_em_safe)
+
+# Model 7: EM Mixture Model (Posterior Match Probabilities)
+# Using the posterior match probabilities from the record linkage 
+adj_em_prob <- adjMixture(
+  linked.data = LD1000, 
+  m.formula = ~ fl_prob
+)
+print(adj_em_prob)
+
+fit_em_prob <- plglm(formula_sci, family = "binomial", adjustment = adj_em_prob)
+summary(fit_em_prob)
+
+# Model 8: EM Mixture Model (All Linkage Paradata)
+adj_em_all <- adjMixture(
+  linked.data = LD1000, 
+  m.formula = ~ fl_prob,
+  safe.matches = safe_match,
+  m.rate = 0.3
+)
+print(adj_em_all)
+
+fit_em_all <- plglm(formula_sci, family = "binomial", adjustment = adj_em_all)
+summary(fit_em_all)
+str(fit_em_all$match.prob)  
+
+
+## ----model8_bayes------------------------------------------------------------------------------------
+round(qlogis(mean(LD1000$Disease_Status)), 2)
+# Phase 1: Define Informative Priors
+adj_bayes <- adjMixBayes(
+  linked.data = LD1000, 
+  priors = list(
+    intercept2 = "normal(-1.09, 3)", 
+    # Empirical log-odds of outcome prevalence
+    beta2 = "normal(0, 0.01)",       
+    # Assume Y and X are roughly independent among non-links
+    theta = "beta(70, 30)"           
+    # A priori expectation of a ~70% correct match rate
+  )
+)
+print(adj_bayes)
+
+# Phase 2: Posterior Sampling via MCMC
+fit_bayes <- plglm(
+  formula = formula_sci, 
+  family = "binomial", 
+  adjustment = adj_bayes,
+  control = list(seed = 2026)
+)
+summary(fit_bayes)
+
+
+## ----mi_pooling--------------------------------------------------------------------------------------
+# Define an alternative exploratory model (e.g., marginal effect of Treatment)
+formula_alternative <- Disease_Status ~ Treatment
+
+# Pool the new model using the pre-computed linkage posteriors
+pooled_mi_fit <- mi_with(
+  object = fit_bayes, 
+  data = LD1000, 
+  formula = formula_alternative, 
+  family = binomial()
+)
+print(pooled_mi_fit)
+
+
+## ----extract_results---------------------------------------------------------------------------------
+extract_model <- function(model_name, fit) {
+  terms <- c("(Intercept)", "BMI", "Age", "Treatment")
+  
+  if (inherits(fit, "glmELE")) {
+    est <- fit$coefficients["BLUE", terms]
+    var_diag <- diag(fit$var[["BLUE"]])
+    if (is.null(names(var_diag))) names(var_diag) <- colnames(fit$coefficients)
+    se <- sqrt(var_diag)[terms]
+  } else if (inherits(fit, "glmMixBayes")) {
+    est <- colMeans(fit$estimates$coefficients)[terms]
+    se <- apply(fit$estimates$coefficients, 2, sd)[terms]
+  } else {
+    sum_obj <- summary(fit)$coefficients
+    est <- sum_obj[terms, 1]
+    se <- sum_obj[terms, 2]
+  }
+  
+  data.frame(Model = model_name, Term = terms, 
+             Estimate = as.numeric(est), SE = as.numeric(se))
+}
+
+# Compile results list
+res_list <- list(
+  extract_model("1. Oracle", fit_oracle),
+  extract_model("2. Naive (All Links)", fit_naive),
+  extract_model("3. Naive (Safe Matches Only)", fit_naive_safe),
+  extract_model("4. ELE (Audit Sample)", fit_ele_audit),
+  extract_model("5. EM (Global Rate)", fit_em_rate),
+  extract_model("6. EM (Safe Matches Only)", fit_em_safe),
+  extract_model("7. EM (Posterior Probabilities)", fit_em_prob),
+  extract_model("8. EM (All)", fit_em_all),
+  extract_model("9. Bayesian (Informative Priors)", fit_bayes)
+)
+
+plot_data <- bind_rows(res_list) %>%
+  mutate(Conf.Low = Estimate - 1.96 * SE, 
+         Conf.High = Estimate + 1.96 * SE,
+         Model = factor(Model, levels = rev(unique(Model))))
+
+
+## ----------------------------------------------------------------------------------------------------
+label_map <- LD1000 %>%
+ count(is_match) %>%
+ mutate(
+  label = ifelse(
+   is_match,
+   paste0("Correct Match\n(C = 1, n = ", n, ")"),
+   paste0("Mismatch\n(C = 0, n = ", n, ")")
+  )
+ )
+y_labels <- setNames(label_map$label, label_map$is_match)
+
+flprob_plot <- ggplot(LD1000, aes(x = fl_prob, y = is_match, fill = is_match)) +
+ geom_boxplot(
+  width = 0.45,
+  staplewidth = 0.25,
+  color = "black",
+  linewidth = 0.6,
+  fatten = 2.4,
+  outlier.shape = 16,
+  outlier.size = 2.4,
+  outlier.alpha = 0.25,
+  outlier.color = "black"
+ ) +
+ stat_summary(
+  fun = mean,
+  geom = "point",
+  shape = 23,
+  size = 3.2,
+  fill = "#0072B2",
+  color = "black",
+  stroke = 0.7
+ ) +
+ scale_fill_manual(values = c("FALSE" = "grey88", "TRUE" = "grey65")) +
+ scale_y_discrete(
+  labels = y_labels,
+  expand = expansion(mult = c(0.32, 0.32))
+ ) +
+ scale_x_continuous(
+  limits = c(0, 1),
+  breaks = seq(0, 1, by = 0.25),
+  labels = scales::number_format(accuracy = 0.01)
+ ) +
+ labs(
+  x = "Posterior Match Probability (fl_prob)",
+  y = NULL
+ ) +
+ theme_bw(base_size = 12, base_family = "sans") +
+ theme(
+  legend.position = "none",
+  panel.grid.major.x = element_line(color = "grey90", linetype = "dashed"),
+  panel.grid.major.y = element_blank(),
+  panel.grid.minor = element_blank(),
+  panel.border = element_rect(fill = NA, color = "black", linewidth = 0.8),
+  axis.text.y = element_text(size = 11.5, color = "black", face = "bold", hjust = 0.5),
+  axis.text.x = element_text(size = 10.5, color = "black"),
+  axis.title.x = element_text(size = 12, margin = margin(t = 8))
+ )
+
+print(flprob_plot)
+
+ggsave("fl_prob.pdf", 
+       plot = flprob_plot, 
+       width = 7, 
+       height = 2.8, 
+       units = "in", 
+       device = cairo_pdf)
+
+
+## ----figure2_plot, fig.width=8, fig.height=4.5-------------------------------------------------------
+clean_labels <- c(
+  "1. Oracle" = "Oracle",
+  "2. Naive (All Links)" = "Naive (All Links)",
+  "3. Naive (Safe Matches Only)" = "Naive (Safe Matches)",
+  "4. ELE (Audit Sample)" = "ELE (Audit Sample)",
+  "5. EM (Global Rate)" = "EM (Global Rate)",
+  "6. EM (Safe Matches Only)" = "EM (Safe Matches)",
+  "7. EM (Posterior Probabilities)" = "EM (Posterior Probabilities)",
+  "8. EM (All)" = "EM (All)",
+  "9. Bayesian (Informative Priors)" = "Bayesian (Informative Priors)"
+)
+
+plot_data <- plot_data %>%
+  mutate(Model_Clean = factor(clean_labels[as.character(Model)], 
+                              levels = rev(clean_labels)))
+
+# True data-generating parameters to draw the reference dashed lines
+true_lines <- data.frame(
+  Term = c("BMI", "Age", "Treatment"),
+  Estimate = c(1.2, 0.8, -1.5)
+)
+
+covariate_plot <- ggplot(plot_data %>% dplyr::filter(Term != "(Intercept)"),
+                         aes(x = Estimate, y = Model_Clean, 
+                             color = Model_Clean)) +
+  geom_vline(xintercept = 0, linetype = "solid", color = "black", 
+             linewidth = 0.4) +
+  geom_vline(data = true_lines, aes(xintercept = Estimate),
+             linetype = "dashed", color = "gray50", linewidth = 0.6) +
+  geom_point(size = 2.5) +
+  geom_errorbarh(aes(xmin = Conf.Low, xmax = Conf.High), height = 0, 
+                 linewidth = 0.8) +
+  facet_wrap(~ Term, scales = "free_x") +
+  theme_bw(base_size = 11, base_family = "sans") +
+  scale_color_viridis_d(option = "plasma", end = 0.8) +
+  labs(x = "Log-Odds Ratio Estimate (95% CI)", y = NULL) +
+  scale_x_continuous(labels = scales::number_format(accuracy = 0.1)) +
+  theme(
+    legend.position = "none",
+    strip.background = element_rect(fill = "white", color = "black", 
+                                    linewidth = 0.8),
+    strip.text = element_text(face = "bold", size = 11),
+    panel.grid.major.y = element_blank(), 
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "black", linewidth = 0.8),
+    axis.text.y = element_text(size = 10, color = "black"),
+    axis.text.x = element_text(size = 9, color = "black")
+  )
+
+print(covariate_plot)
+
+ggsave("covariate_plot.pdf",
+       plot = covariate_plot,
+       width = 8,
+       height = 4.5,
+       units = "in",
+       device = cairo_pdf)
+
+
+## ----table2_summary----------------------------------------------------------------------------------
+table_data <- plot_data %>%
+  select(Model, Term, Estimate, SE) %>%
+  pivot_wider(names_from = Term, 
+              values_from = c(Estimate, SE),
+              names_glue = "{Term}_{.value}") %>%
+  select(Model, 
+         `(Intercept)_Estimate`, `(Intercept)_SE`,
+         `BMI_Estimate`, `BMI_SE`,
+         `Age_Estimate`, `Age_SE`,
+         `Treatment_Estimate`, `Treatment_SE`)
+
+table_data %>%
+  mutate(across(where(is.numeric), ~ sprintf("%.3f", .))) %>%
+  kbl(row.names = FALSE, 
+      col.names = c("Model", "Est.", "SE", "Est.", "SE", "Est.",
+                    "SE", "Est.", "SE"),
+      align = c("l", rep("r", 8))) %>%
+  add_header_above(c(" " = 1, "(Intercept)" = 2, "BMI" = 2, "Age" = 2,
+                     "Treatment" = 2)) %>%
+  kable_classic_2(full_width = TRUE, html_font = "sans-serif")
+
+
+## ----session_info------------------------------------------------------------------------------------
+sessionInfo()
+

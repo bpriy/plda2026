@@ -1,0 +1,1206 @@
+---
+title: "Spline Simulations Full Results"
+output:
+  html_document:
+    code_folding: hide
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+```
+
+## Summary of the Results {.tabset}
+
+```{r}
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(ggrepel)
+
+data_dir <- "sim_results"
+file_list <- list.files(path = data_dir, pattern = "res_scen_.*_chunk_.*\\.rds",
+                        full.names = TRUE)
+
+raw_sim_data <- file_list %>% map_dfr(readRDS)
+
+summary_stats <- raw_sim_data %>%
+ select(-starts_with("pt_cov_")) %>%
+ group_by(n, sigma_true, K, Alpha_Setting, Method) %>%
+ summarise(
+  Reps = n(),
+  Failures = sum(Failed, na.rm = TRUE),
+  Mean_RMSE = mean(RMSE, na.rm = TRUE),
+  Empirical_Coverage = mean(Coverage, na.rm = TRUE),
+  
+  Bias_Sigma = mean(Bias_Sigma, na.rm = TRUE),
+  Cov_Sigma = mean(Cov_Sigma, na.rm = TRUE),
+  
+  # ratio of the estimated $\tau^2$ to the Oracle $\tau^2$
+  Mean_Tau2_Ratio = mean(Tau2_Est / (Tau2_Est - Bias_Tau2), na.rm = TRUE),
+  
+  Bias_Tau2 = mean(Bias_Tau2, na.rm = TRUE),
+    Cov_Tau2 = mean(Cov_Tau2, na.rm = TRUE),
+  
+  Bias_Alpha_1 = mean(Bias_Alpha_1, na.rm = TRUE),
+  Cov_Alpha_1 = mean(Cov_Alpha_1, na.rm = TRUE),
+  Bias_Alpha_2 = mean(Bias_Alpha_2, na.rm = TRUE),
+  Cov_Alpha_2 = mean(Cov_Alpha_2, na.rm = TRUE),
+  Bias_Alpha_3 = mean(Bias_Alpha_3, na.rm = TRUE),
+  Cov_Alpha_3 = mean(Cov_Alpha_3, na.rm = TRUE),
+  Bias_Alpha_4 = mean(Bias_Alpha_4, na.rm = TRUE),
+  Cov_Alpha_4 = mean(Cov_Alpha_4, na.rm = TRUE),
+  
+  Avg_Time_Sec = mean(Time, na.rm = TRUE),
+  .groups = "drop"
+ ) %>%
+ arrange(K, n, sigma_true, factor(Method, 
+                                  levels = c("Oracle", "Naive", "ELE_n1_5",
+                                             "ELE_n1_2", "ELE_GCV", "ELE_REML",
+                                             "Gibbs", "VB")))
+
+table_function_est <- summary_stats %>%
+ select(K, n, sigma_true, Alpha_Setting, Method, Mean_RMSE, Empirical_Coverage, Avg_Time_Sec) %>%
+ mutate(
+  Mean_RMSE = sprintf("%.4f", Mean_RMSE),
+  Empirical_Coverage = sprintf("%.3f", Empirical_Coverage),
+  Avg_Time_Sec = sprintf("%.2f", Avg_Time_Sec)
+ )
+
+table_variance_comp <- summary_stats %>%
+ select(K, n, sigma_true, Alpha_Setting, Method, Bias_Sigma, Cov_Sigma, Mean_Tau2_Ratio, Bias_Tau2, Cov_Tau2) %>%
+ filter(!Method %in% c("Oracle", "Naive") | !is.na(Bias_Sigma)) %>%
+ mutate(
+  Bias_Sigma = ifelse(is.na(Bias_Sigma), "-", sprintf("%.4f", Bias_Sigma)),
+  Cov_Sigma = ifelse(is.na(Cov_Sigma), "-", sprintf("%.3f", Cov_Sigma)),
+  Mean_Tau2_Ratio = ifelse(is.na(Mean_Tau2_Ratio), "-", sprintf("%.3f", Mean_Tau2_Ratio)),
+  Bias_Tau2 = ifelse(is.na(Bias_Tau2), "-", sprintf("%.4f", Bias_Tau2)),
+  Cov_Tau2 = ifelse(is.na(Cov_Tau2), "-", sprintf("%.3f", Cov_Tau2))
+ )
+
+table_alpha_K1 <- summary_stats %>%
+ filter(K == 1, Method %in% c("Gibbs", "VB", "ELE_n1_5", "ELE_n1_2", "ELE_GCV", "ELE_REML")) %>%
+ select(n, sigma_true, Alpha_Setting, Method, Bias_Alpha_1, Cov_Alpha_1) %>%
+ mutate(across(starts_with("Bias"), ~ ifelse(is.na(.), "-", sprintf("%.4f", .))),
+        across(starts_with("Cov"), ~ ifelse(is.na(.), "-", sprintf("%.3f", .))))
+
+table_alpha_K4 <- summary_stats %>%
+ filter(K == 4, Method %in% c("Gibbs", "VB", "ELE_n1_5", "ELE_n1_2", "ELE_GCV", "ELE_REML")) %>%
+ select(n, sigma_true, Alpha_Setting, Method, starts_with("Bias_Alpha"), starts_with("Cov_Alpha")) %>%
+ mutate(across(starts_with("Bias"), ~ ifelse(is.na(.), "-", sprintf("%.4f", .))),
+        across(starts_with("Cov"), ~ ifelse(is.na(.), "-", sprintf("%.3f", .))))
+
+table_failures <- summary_stats %>%
+ mutate(Failures_Report = paste0(Failures, " / ", Reps)) %>%
+ select(K, Alpha_Setting, n, sigma_true, Method, Failures_Report) %>%
+ arrange(K, Alpha_Setting, n, sigma_true)
+```
+
+### Tables {.tabset}
+
+#### Spline Function Estimation & Run Time {.tabset}
+
+##### (Single Block, K=1) {.tabset}
+
+```{r results='asis'}
+for(a in unique(table_function_est$Alpha_Setting[table_function_est$K == 1])) {
+  cat("###### Alpha Setting: ", a, "\n\n")
+  
+  out <- table_function_est %>%
+    filter(K == 1, Alpha_Setting == a) %>%
+    select(-K, -Alpha_Setting) %>%
+    kbl(align = "c", col.names = c("n", "Sigma", "Method", "Mean RMSE", "Coverage", "Time (sec)")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed", "bordered"), full_width = FALSE, font_size = 12) %>%
+    collapse_rows(columns = 1:2, valign = "middle")
+    
+  cat(out, "\n\n")
+}
+```
+
+##### (Four Blocks, K=4) {.tabset}
+
+```{r results='asis'}
+for(a in unique(table_function_est$Alpha_Setting[table_function_est$K == 4])) {
+  cat("###### Alpha Setting: ", a, "\n\n")
+  
+  out <- table_function_est %>%
+    filter(K == 4, Alpha_Setting == a) %>%
+    select(-K, -Alpha_Setting) %>%
+    kbl(align = "c", col.names = c("n", "Sigma", "Method", "Mean RMSE", "Coverage", "Time (sec)")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed", "bordered"), full_width = FALSE, font_size = 12) %>%
+    collapse_rows(columns = 1:2, valign = "middle")
+    
+  cat(out, "\n\n")
+}
+```
+
+#### Sigma and Tau^2 {.tabset}
+
+In the table below, we additionally add the ratio of the estimated $\tau^2$ to the Oracle $\tau^2$ (since the "bias" and "coverage" might not be suitable summary results here as they are based on the Oracle baseline and we don't have a fixed true value).
+
+##### (Single Block, K=1) {.tabset}
+
+```{r results='asis'}
+for(a in unique(table_variance_comp$Alpha_Setting[table_variance_comp$K == 1])) {
+  cat("###### Alpha Setting: ", a, "\n\n")
+  
+  out <- table_variance_comp %>%
+    filter(K == 1, Alpha_Setting == a) %>%
+    select(-K, -Alpha_Setting) %>%
+    kbl(align = "c", col.names = c("n", "Sigma", "Method", "Bias Sigma", "Cov Sigma", "Tau^2 Ratio", "Bias Tau^2", "Cov Tau^2")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed", "bordered"), full_width = FALSE, font_size = 12) %>%
+    collapse_rows(columns = 1:2, valign = "middle")
+    
+  cat(out, "\n\n")
+}
+```
+
+##### (Four Blocks, K=4) {.tabset}
+
+```{r results='asis'}
+for(a in unique(table_variance_comp$Alpha_Setting[table_variance_comp$K == 4])) {
+  cat("###### Alpha Setting: ", a, "\n\n")
+  
+  out <- table_variance_comp %>%
+    filter(K == 4, Alpha_Setting == a) %>%
+    select(-K, -Alpha_Setting) %>%
+    kbl(align = "c", col.names = c("n", "Sigma", "Method", "Bias Sigma", "Cov Sigma", "Tau^2 Ratio", "Bias Tau^2", "Cov Tau^2")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed", "bordered"), full_width = FALSE, font_size = 12) %>%
+    collapse_rows(columns = 1:2, valign = "middle")
+    
+  cat(out, "\n\n")
+}
+```
+
+#### Mismatch Rate {.tabset}
+
+##### (Single Block, K=1) {.tabset}
+
+```{r results='asis'}
+for(a in unique(table_alpha_K1$Alpha_Setting)) {
+  cat("###### Alpha Setting: ", a, "\n\n")
+  
+  out <- table_alpha_K1 %>%
+    filter(Alpha_Setting == a) %>%
+    select(-Alpha_Setting) %>%
+    kbl(align = "c", col.names = c("n", "Sigma", "Method", "Bias Alpha", "Cov Alpha")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed", "bordered"), full_width = FALSE, font_size = 12) %>%
+    collapse_rows(columns = 1:2, valign = "middle")
+    
+  cat(out, "\n\n")
+}
+```
+
+##### (Four Blocks, K=4) {.tabset}
+
+```{r results='asis'}
+for(a in unique(table_alpha_K4$Alpha_Setting)) {
+  cat("###### Alpha Setting: ", a, "\n\n")
+  
+  out <- table_alpha_K4 %>%
+    filter(Alpha_Setting == a) %>%
+    select(-Alpha_Setting) %>%
+    kbl(align = "c", col.names = c("n", "Sigma", "Method", "Bias A1", "Bias A2", "Bias A3", "Bias A4", "Cov A1", "Cov A2", "Cov A3", "Cov A4")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed", "bordered"), full_width = FALSE, font_size = 12) %>%
+    collapse_rows(columns = 1:2, valign = "middle")
+    
+  cat(out, "\n\n")
+}
+```
+
+#### Failed Replications
+
+```{r}
+table_failures %>%
+  kbl(align = "c", col.names = c("K", "Alpha", "n", "Sigma", "Method", "Failures / Total Trials")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "bordered"), full_width = FALSE, font_size = 12) %>%
+  collapse_rows(columns = 1:4, valign = "middle")
+```
+
+### Plots {.tabset}
+
+```{r}
+method_colors <- c(
+ "Oracle"   = "#000000", # Black
+ "Naive"    = "#D55E00", # Vermillion
+ "ELE_n1_5" = "#56B4E9", # Sky Blue
+ "ELE_n1_2" = "#0072B2", # Blue
+ "ELE_GCV"  = "#F0E442", # Yellow
+ "ELE_REML" = "#E69F00", # Orange
+ "Gibbs"    = "#009E73", # Bluish Green
+ "VB"       = "#CC79A7"  # Reddish Purple
+)
+```
+
+#### Point-wise Coverage {.tabset}
+
+There are two plots below (including or excluding the naive approach).
+
+##### Single Block, K=1 (Overall) {.tabset}
+
+```{r results='asis', fig.height=9, fig.width=12}
+coverage_profile <- raw_sim_data %>%
+ group_by(K, n, sigma_true, Alpha_Setting, Method) %>%
+ summarise(across(starts_with("pt_cov_"), mean), .groups = "drop") %>%
+ pivot_longer(cols = starts_with("pt_cov_"), 
+              names_to = "grid_idx", 
+              values_to = "coverage") %>%
+ mutate(
+  grid_idx = as.numeric(gsub("pt_cov_", "", grid_idx)),
+  x = (grid_idx - 1) / 199,
+  Scenario = factor(paste0("n=", n, "\nSigma=", sigma_true)),
+  Method = factor(Method, levels = names(method_colors)),
+  Alpha_Setting = as.factor(Alpha_Setting)
+ )
+
+for(a in unique(coverage_profile$Alpha_Setting[coverage_profile$K == 1])) {
+  cat("###### Alpha Setting: ", a, "\n\n")
+  
+  p <- ggplot(coverage_profile %>% filter(K == 1, Alpha_Setting == a), aes(x = x, y = coverage, color = Method)) +
+   geom_hline(yintercept = 0.95, linetype = "dashed", color = "gray30") +
+   geom_line(alpha = 0.8, linewidth = 0.8) +
+   facet_wrap(~ Scenario, ncol = 4) +
+   scale_color_manual(values = method_colors) +
+   theme_bw(base_size = 14) +
+   theme(legend.position = "bottom", legend.box = "vertical") +
+   labs(title = paste("Point-wise 95% Coverage Probability (Alpha =", a, ")"),
+        x = "x",
+        y = "Empirical Coverage",
+        color = "Method") +
+   coord_cartesian(ylim = c(0.0, 1.0))
+   
+  print(p)
+  cat("\n\n")
+}
+```
+
+##### (Zoomed) {.tabset}
+
+```{r results='asis', fig.height=9, fig.width=12}
+coverage_profile_zoomed <- raw_sim_data %>%
+ filter(Method != "Naive") %>% 
+ group_by(K, n, sigma_true, Alpha_Setting, Method) %>%
+ summarise(across(starts_with("pt_cov_"), mean), .groups = "drop") %>%
+ pivot_longer(cols = starts_with("pt_cov_"), 
+              names_to = "grid_idx", 
+              values_to = "coverage") %>%
+ mutate(
+  grid_idx = as.numeric(gsub("pt_cov_", "", grid_idx)),
+  x = (grid_idx - 1) / 199,
+  Scenario = factor(paste0("n=", n, "\nSigma=", sigma_true)),
+  Method = factor(Method, levels = names(method_colors)),
+  Alpha_Setting = as.factor(Alpha_Setting)
+ )
+
+for(a in unique(coverage_profile_zoomed$Alpha_Setting[coverage_profile_zoomed$K == 1])) {
+  cat("###### Alpha Setting: ", a, "\n\n")
+  
+  p <- ggplot(coverage_profile_zoomed %>% filter(K == 1, Alpha_Setting == a), aes(x = x, y = coverage, color = Method)) +
+   geom_hline(yintercept = 0.95, linetype = "dashed", color = "gray30") +
+   geom_line(alpha = 0.8, linewidth = 0.8) +
+   facet_wrap(~ Scenario, ncol = 4) +
+   scale_color_manual(values = method_colors) +
+   theme_bw(base_size = 14) +
+   theme(legend.position = "bottom", legend.box = "vertical") +
+   labs(title = paste("Point-wise 95% Coverage Probability (Zoomed, Naive Excluded | Alpha =", a, ")"),
+        x = "x",
+        y = "Empirical Coverage",
+        color = "Method") +
+   coord_cartesian(ylim = c(0.9, 1.00)) 
+   
+  print(p)
+  cat("\n\n")
+}
+```
+
+##### Four Blocks, K=4 (Overall) {.tabset}
+
+```{r results='asis', fig.height=9, fig.width=12}
+for(a in unique(coverage_profile$Alpha_Setting[coverage_profile$K == 4])) {
+  cat("###### Alpha Setting: ", a, "\n\n")
+  
+  p <- ggplot(coverage_profile %>% filter(K == 4, Alpha_Setting == a), aes(x = x, y = coverage, color = Method)) +
+   geom_hline(yintercept = 0.95, linetype = "dashed", color = "gray30") +
+   geom_line(alpha = 0.8, linewidth = 0.8) +
+   facet_wrap(~ Scenario, ncol = 4) +
+   scale_color_manual(values = method_colors) +
+   theme_bw(base_size = 14) +
+   theme(legend.position = "bottom", legend.box = "vertical") +
+   labs(title = paste("Point-wise 95% Coverage Probability (Alpha =", a, ")"),
+        x = "x",
+        y = "Empirical Coverage",
+        color = "Method") +
+   coord_cartesian(ylim = c(0.0, 1.0))
+   
+  print(p)
+  cat("\n\n")
+}
+```
+
+##### (Zoomed) {.tabset}
+
+```{r results='asis', fig.height=9, fig.width=12}
+for(a in unique(coverage_profile_zoomed$Alpha_Setting[coverage_profile_zoomed$K == 4])) {
+  cat("###### Alpha Setting: ", a, "\n\n")
+  
+  p <- ggplot(coverage_profile_zoomed %>% filter(K == 4, Alpha_Setting == a), aes(x = x, y = coverage, color = Method)) +
+   geom_hline(yintercept = 0.95, linetype = "dashed", color = "gray30") +
+   geom_line(alpha = 0.8, linewidth = 0.8) +
+   facet_wrap(~ Scenario, ncol = 4) +
+   scale_color_manual(values = method_colors) +
+   theme_bw(base_size = 14) +
+   theme(legend.position = "bottom", legend.box = "vertical") +
+   labs(title = paste("Point-wise 95% Coverage Probability (Zoomed, Naive Excluded | Alpha =", a, ")"),
+        x = "x",
+        y = "Empirical Coverage",
+        color = "Method") +
+   coord_cartesian(ylim = c(0.9, 1.00)) 
+   
+  print(p)
+  cat("\n\n")
+}
+```
+
+#### RMSE Distribution Boxplots {.tabset}
+
+##### Single Block, K=1 {.tabset}
+
+```{r results='asis', fig.height=9, fig.width=12}
+rmse_data <- raw_sim_data %>%
+ mutate(
+  Scenario = factor(paste0("n=", n, "\nSigma=", sigma_true)),
+  Method = factor(Method, levels = names(method_colors)),
+  Alpha_Setting = as.factor(Alpha_Setting)
+ )
+
+for(a in unique(rmse_data$Alpha_Setting[rmse_data$K == 1])) {
+  cat("###### Alpha Setting: ", a, "\n\n")
+  
+  p <- ggplot(rmse_data %>% filter(K == 1, Alpha_Setting == a), aes(x = Method, y = RMSE, fill = Method)) +
+   geom_boxplot(outlier.alpha = 0.3, outlier.size = 1) +
+   facet_wrap(~ Scenario, ncol = 4, scales = "free_y") +
+   scale_fill_manual(values = method_colors) +
+   scale_y_log10() + 
+   theme_bw(base_size = 12) +
+   theme(axis.text.x = element_text(angle = 45, hjust = 1),
+         legend.position = "none") +
+   labs(title = paste("Distribution of Function Estimation RMSE (Alpha =", a, ")"),
+        x = NULL,
+        y = "Root Mean Squared Error (Log10 Scale)")
+        
+  print(p)
+  cat("\n\n")
+}
+```
+
+##### Four Blocks, K=4 {.tabset}
+
+```{r results='asis', fig.height=9, fig.width=12}
+for(a in unique(rmse_data$Alpha_Setting[rmse_data$K == 4])) {
+  cat("###### Alpha Setting: ", a, "\n\n")
+  
+  p <- ggplot(rmse_data %>% filter(K == 4, Alpha_Setting == a), aes(x = Method, y = RMSE, fill = Method)) +
+   geom_boxplot(outlier.alpha = 0.3, outlier.size = 1) +
+   facet_wrap(~ Scenario, ncol = 4, scales = "free_y") +
+   scale_fill_manual(values = method_colors) +
+   scale_y_log10() + 
+   theme_bw(base_size = 12) +
+   theme(axis.text.x = element_text(angle = 45, hjust = 1),
+         legend.position = "none") +
+   labs(title = paste("Distribution of Function Estimation RMSE (Alpha =", a, ")"),
+        x = NULL,
+        y = "Root Mean Squared Error (Log10 Scale)")
+        
+  print(p)
+  cat("\n\n")
+}
+```
+
+#### RMSE vs. $\sigma_*$ 
+
+```{r fig.height=10, fig.width=12}
+cross_data <- summary_stats %>%
+ mutate(
+  Scenario = factor(paste0("K=", K, ", n=", n, "\nAlpha=", Alpha_Setting)),
+  Method = factor(Method, levels = names(method_colors)),
+  sigma_true_factor = factor(sigma_true)
+ )
+
+ggplot(cross_data, aes(x = sigma_true_factor, y = Mean_RMSE, 
+                             color = Method, group = Method, shape = Method)) +
+ geom_line(linewidth = 1.2, alpha = 0.8) +
+ geom_point(size = 3.5) +
+ 
+ facet_wrap(~ Scenario, ncol = 3, scales = "free_y") +
+ 
+ scale_color_manual(values = method_colors) +
+ scale_shape_manual(values = c(16, 17, 15, 18, 3, 4, 8, 21)) + 
+ 
+ theme_bw(base_size = 14) +
+ theme(
+  legend.position = "bottom",
+  legend.title = element_text(face = "bold"),
+  legend.key.width = unit(2, "cm"), 
+  strip.background = element_rect(fill = "grey90", color = "black"),
+  strip.text = element_text(face = "bold", size = 11),
+  panel.grid.minor = element_blank(),
+  axis.text.x = element_text(angle = 45, hjust = 1) 
+ ) +
+ 
+ labs(
+  title = "RMSE by Noise Level",
+  x = expression(paste("True (", sigma["*"], ")")),
+  y = "Mean RMSE",
+  color = "Method",
+  shape = "Method"
+ )
+```
+
+#### Run Time vs. RMSE Trade-off {.tabset}
+
+##### Single Block, K=1 {.tabset}
+
+```{r results='asis', fig.height=9, fig.width=12}
+tradeoff_data <- summary_stats %>%
+ mutate(
+  Scenario = paste0("n=", n, "\nSigma=", sigma_true),
+  Method = factor(Method, levels = names(method_colors)),
+  Alpha_Setting = as.factor(Alpha_Setting)
+ )
+
+for(a in unique(tradeoff_data$Alpha_Setting[tradeoff_data$K == 1])) {
+  cat("###### Alpha Setting: ", a, "\n\n")
+  
+  p <- ggplot(tradeoff_data %>% filter(K == 1, Alpha_Setting == a), aes(x = Avg_Time_Sec, y = Mean_RMSE, color = Method)) +
+   geom_point(size = 3.5, alpha = 0.8) +
+   facet_wrap(~ Scenario, ncol = 4, scales = "free") +
+   scale_color_manual(values = method_colors) +
+   scale_x_log10() + 
+   scale_y_log10() +
+   theme_bw(base_size = 14) +
+   theme(legend.position = "bottom", legend.box = "vertical") +
+   labs(title = paste("Accuracy vs. Computational Cost Trade-off (Alpha =", a, ")"),
+        x = "Average Computation Time (Seconds, Log10 Scale)",
+        y = "Mean RMSE (Log10 Scale)",
+        color = "Method")
+  print(p)
+  cat("\n\n")
+}
+```
+
+##### Four Blocks, K=4 {.tabset}
+
+```{r results='asis', fig.height=9, fig.width=12}
+for(a in unique(tradeoff_data$Alpha_Setting[tradeoff_data$K == 4])) {
+  cat("###### Alpha Setting: ", a, "\n\n")
+  
+  p <- ggplot(tradeoff_data %>% filter(K == 4, Alpha_Setting == a), aes(x = Avg_Time_Sec, y = Mean_RMSE, color = Method)) +
+   geom_point(size = 3.5, alpha = 0.8) +
+   facet_wrap(~ Scenario, ncol = 4, scales = "free") +
+   scale_color_manual(values = method_colors) +
+   scale_x_log10() + 
+   scale_y_log10() +
+   theme_bw(base_size = 14) +
+   theme(legend.position = "bottom", legend.box = "vertical") +
+   labs(title = paste("Accuracy vs. Computational Cost Trade-off (Alpha =", a, ")"),
+        x = "Average Computation Time (Seconds, Log10 Scale)",
+        y = "Mean RMSE (Log10 Scale)",
+        color = "Method")
+  print(p)
+  cat("\n\n")
+}
+```
+
+## Appendix {.tabset}
+
+### HPC Script
+
+```{bash eval = FALSE, class.source="fold-show"}
+#!/bin/bash
+#SBATCH --job-name=spline_sim
+#SBATCH --output=logs/sim_%A_%a.out
+#SBATCH --error=logs/sim_%A_%a.err
+#SBATCH --array=1-400              
+#SBATCH --time=01:00:00            
+#SBATCH --cpus-per-task=1          
+#SBATCH --mem=2G                   
+#SBATCH --partition=standard
+
+module load goolf R
+
+mkdir -p logs
+mkdir -p sim_results
+
+Rscript Spline_Simulations.R
+```
+
+### R Script
+
+```{r eval = FALSE, class.source="fold-show"}
+# ******************************************************************************
+# Spline Regression with Mismatch Error
+# ******************************************************************************
+.libPaths("~/R/hpc_libs")
+
+library(mgcv)
+library(MASS)
+library(Matrix)
+
+# 1. ELE Permutation Helpers (Model II)
+# ------------------------------------------------------------------------------
+# random permutation with no fixed point (zero diagonal entries)
+get_perm <- function(n_items) {
+ if (n_items == 0) return(integer(0))
+ if (n_items == 1) return(1) 
+ x <- 1:n_items
+ while (TRUE) {
+  px <- sample(x)
+  if (all(px != x)) return(px)
+ }
+}
+
+# 2. Simulation Configuration & Grid
+# ------------------------------------------------------------------------------
+N_REPS <- 1000
+
+# Define scenarios (K=1 block and K=4 blocks)
+scenarios <- list()
+
+for (n in c(500, 2000)) {
+ for (sigma in c(0.1, 0.25, 0.75, 1, 1.25)) {
+  # K = 1 scenarios
+  for (a in c(0.05, 0.15, 0.3)) {
+   scenarios[[length(scenarios) + 1]] <- list(
+    n = n, sigma = sigma, K = 1, alphas = a
+   )
+  }
+  # K = 4 scenario 
+  scenarios[[length(scenarios) + 1]] <- list(
+   n = n, sigma = sigma, K = 4, alphas = c(0.05, 0.1, 0.2, 0.3)
+  )
+ }
+}
+
+eval_grid <- data.frame(x = seq(0, 1, length.out = 200))
+true_f_eval <- sin(1.5 * pi * eval_grid$x)
+
+# 3. Data Generation Process (w/ Block Permutation Logic)
+# ------------------------------------------------------------------------------
+generate_data <- function(n, sigma, K, alphas, rep_id, global_seed) {
+ base_seed <- rep_id * 10000 + n + K * 100 + as.integer(sigma * 100)
+ set.seed(base_seed)
+ 
+ # Generate true X equally spaced
+ x <- seq(0, 1, length.out = n)
+ 
+ # Randomly assign records to K blocks 
+ Block <- sample(rep(1:K, each = n/K))
+ 
+ # Generate True Signal and True Y
+ f_true <- sin(1.5 * pi * x)
+ Y <- rnorm(n, f_true, sigma)
+ z <- rnorm(n, 0, 1)
+ 
+ M <- c(table(Block)) # block sizes
+ Ystar <- numeric(n)
+ m_true <- numeric(n)
+ 
+ set.seed(global_seed)
+ 
+ # Permute Y to get Ystar (with linkage errors via Model II)
+ for(q in 1:K) {
+  idx <- which(Block == q)
+  mq <- M[q]
+  
+  n_mismatch <- round(mq * alphas[q])
+  
+  if(n_mismatch > 0) {
+   mis_idx_relative <- sample(1:mq, n_mismatch)
+   perm_relative <- mis_idx_relative[get_perm(n_mismatch)]
+   
+   y_block <- Y[idx]
+   y_shuffled <- y_block
+   y_shuffled[mis_idx_relative] <- y_block[perm_relative]
+   
+   Ystar[idx] <- y_shuffled
+   m_true[idx[mis_idx_relative]] <- 1 # m_i = I(Pi_ii != 1)
+  } else {
+   Ystar[idx] <- Y[idx]
+  }
+ }
+ 
+ ord <- order(Block)
+ 
+ list(x = x[ord], y_obs = Ystar[ord], y_true = Y[ord], z = z[ord], 
+      blocks = Block[ord], m = m_true[ord], f_true = f_true[ord])
+}
+
+# 4. Model Estimation Wrappers
+# ------------------------------------------------------------------------------
+build_Q_matrix <- function(n, K, blocks, alphas) {
+ Q_list <- lapply(1:K, function(k) {
+  nk <- sum(blocks == k)
+  ak <- alphas[k]
+  if (ak == 0) return(diag(nk))
+  (1 - ak - ak/(nk - 1)) * diag(nk) + (ak/(nk - 1)) * matrix(1, nk, nk)
+ })
+ as.matrix(bdiag(Q_list))
+}
+
+# ELE Approach
+fit_ele <- function(dat, K, alphas, sp_choice, sigma_true, eval_grid) {
+ n <- length(dat$y_obs)
+ 
+ gam_naive <- gam(y_obs ~ s(x, bs="cr", k=25), data = dat)
+ gamobj <- gam(y_obs ~ s(x, bs="cr", k=25, fx=FALSE), data = dat, fit = FALSE)
+ 
+ X <- as.matrix(gamobj$X)[, -1] 
+ xc <- dat$x - mean(dat$x)
+ 
+ P <- gamobj$smooth[[1]]$S[[1]]
+ svdP <- svd(P)
+ rankthres <- 1e-8
+ rankP <- sum(svdP$d > rankthres)
+ Rinv <- svdP$v[, 1:rankP] %*% diag(1/sqrt(svdP$d[1:rankP])) %*% t(svdP$u[, 1:rankP])
+ 
+ Q <- build_Q_matrix(n, K, dat$blocks, alphas)
+ Qxc <- Q %*% xc
+ QX <- Q %*% X
+ 
+ Z_Q <- residuals(lm(QX ~ Qxc))
+ Z_Qtilde <- Z_Q %*% Rinv
+ 
+ svdZ <- svd(Z_Qtilde)
+ rankZ <- sum(svdZ$d > rankthres)
+ VQr <- svdZ$v[, 1:rankZ]
+ DQr <- svdZ$d[1:rankZ]
+ UQr <- svdZ$u[, 1:rankZ]
+ 
+ ypermtilde <- residuals(lm(dat$y_obs ~ Qxc))
+ 
+ if (is.character(sp_choice)) {
+  ele_dat <- data.frame(y_tilde = as.numeric(ypermtilde))
+  ele_dat$Z <- Z_Qtilde
+  
+  mgcv_method <- ifelse(sp_choice == "GCV", "GCV.Cp", "REML")
+  mgcv_fit <- gam(y_tilde ~ -1 + Z, 
+                  data = ele_dat, 
+                  paraPen = list(Z = list(diag(1, ncol(Z_Qtilde)))), 
+                  method = mgcv_method)
+  
+  sp <- as.numeric(mgcv_fit$sp)
+ } else if (is.numeric(sp_choice)) {
+  sp <- sp_choice
+ } else {
+  stop("Invalid sp_choice provided.")
+ }
+ 
+ L <- solve(crossprod(Z_Qtilde) + sp * diag(1, ncol(Z_Qtilde)))
+ alphahat <- L %*% crossprod(Z_Qtilde, ypermtilde)
+ 
+ alphahat_db <- alphahat + sp * drop(VQr %*% (drop(crossprod(VQr, alphahat)) / (DQr^2 + sp)))
+ betahat_db <- Rinv %*% alphahat_db
+ 
+ # Based on (Eq 12) 
+ tilde_f <- as.numeric(X %*% betahat_db - 
+                        xc * drop(crossprod(Qxc, QX %*% betahat_db)) / sum(Qxc^2) + 
+                        xc * coef(lm(dat$y_obs ~ Qxc))[2] + 
+                        mean(dat$y_obs))
+ 
+ rss <- sum((dat$y_obs - tilde_f)^2)
+ penalty_term <- 2 * sum(tilde_f * (as.numeric((diag(n) - Q) %*% tilde_f)))
+ 
+ sig2_est <- (rss - penalty_term) / n
+ sig2_est <- max(sig2_est, 1e-6)
+ 
+ X_eval <- predict(gam_naive, newdata = eval_grid, type = "lpmatrix")[, -1]
+ xc_eval <- eval_grid$x - mean(dat$x)
+ 
+ f_est <- as.numeric(X_eval %*% betahat_db - 
+                      xc_eval * drop(crossprod(Qxc, QX %*% betahat_db)) / sum(Qxc^2) + 
+                      xc_eval * coef(lm(dat$y_obs ~ Qxc))[2] + 
+                      mean(dat$y_obs))
+ 
+ D <- numeric(n)
+ for (i in 1:n) {
+  k <- dat$blocks[i]
+  ak <- alphas[k]
+  if(ak > 0) {
+   idx_k <- which(dat$blocks == k)
+   mu_k <- tilde_f[idx_k] 
+   i_in_k <- which(idx_k == i)
+   
+   mu_i <- mu_k[i_in_k]
+   mu_m_i <- mu_k[-i_in_k]
+   
+   D[i] <- ((1-ak) - (1-ak)^2)*mu_i^2 + ak*mean(mu_m_i^2) - 
+    ak^2*mean(mu_m_i)^2 - 2*ak*(1-ak)*mu_i*mean(mu_m_i)
+  }
+ }
+ 
+ A <- VQr %*% diag(sp / (DQr^2 + sp)) %*% t(VQr)
+ A <- A + diag(1, nrow(A))
+ 
+ Xtilde_eval <- X_eval - (as.matrix(xc_eval) %*% crossprod(Qxc, QX)) / sum(Qxc^2)
+ 
+ A_mat <- Xtilde_eval %*% Rinv %*% A %*% L %*% t(Z_Qtilde)
+ B_mat <- cbind(1, xc_eval) %*% solve(crossprod(cbind(1, Qxc))) %*% t(cbind(1, Qxc))
+ 
+ var_vec <- as.numeric((A_mat^2) %*% (D + sig2_est) + 
+                        (B_mat^2) %*% (D + sig2_est) + 
+                        2 * (A_mat * B_mat) %*% (D + sig2_est))
+ 
+ lower <- f_est - sqrt(var_vec) * qnorm(0.975)
+ upper <- f_est + sqrt(var_vec) * qnorm(0.975)
+ 
+ return(list(f_est = f_est, lower = lower, upper = upper, sigma = sqrt(sig2_est)))
+}
+
+# Gibbs Approach - Updated For K-Blocks According to ELE Assumption
+fit_gibbs <- function(dat, K, n_iter = 1500, burn_in = 500) {
+ t0 <- Sys.time()
+ 
+ df <- data.frame(x = dat$x, y = dat$y_obs)
+ formula <- y ~ s(x, bs="cr", k=25)
+ blocks <- dat$blocks 
+ 
+ gam_naive <- gam(formula, data = df)
+ gamobj <- gam(formula, data = df, fit = FALSE)
+ 
+ beta_naive <- as.numeric(coef(gam_naive))
+ n <- length(dat$y_obs)
+ y <- dat$y_obs
+ 
+ Bgam <- as.matrix(gamobj$X)
+ Sgam <- rbind(0, cbind(0, gamobj$smooth[[1]]$S[[1]]))
+ 
+ d <- ncol(Bgam)
+ rank_S <- sum(abs(eigen(Sgam, symmetric = TRUE, only.values = TRUE)$values) > 1e-8)
+ 
+ kdeobj <- density(y)
+ kdefun <- approxfun(kdeobj$x, kdeobj$y, method = "constant", rule = 2) 
+ fy_vals <- pmax(kdefun(y), 1e-10) 
+ 
+ XtX_total <- crossprod(Bgam)
+ Xty_total <- crossprod(Bgam, y)
+ 
+ m <- rep(0, n)
+ alpha <- rep(0.1, K) 
+ beta <- beta_naive
+ sigma2 <- var(y) * 0.5
+ tau2 <- 1
+ 
+ n_save <- n_iter - burn_in
+ samples_beta <- matrix(0, n_save, d)
+ samples_alpha <- matrix(0, n_save, K)
+ samples_sigma2 <- numeric(n_save)
+ samples_tau2 <- numeric(n_save)
+ sum_m_probs <- rep(0, n)
+ 
+ n_k <- sapply(1:K, function(k) sum(blocks == k))
+ 
+ # Gibbs Loop
+ for (iter in 1:n_iter) {
+  
+  mu_curr <- as.vector(Bgam %*% beta)
+  lik_correct <- dnorm(y, mean = mu_curr, sd = sqrt(sigma2))
+  
+  prob_prior <- alpha[blocks]
+  
+  num <- fy_vals * prob_prior
+  den <- num + lik_correct * (1 - prob_prior)
+  prob_m1 <- num / (den + 1e-300)
+  
+  m <- rbinom(n, 1, prob_m1)
+  
+  sum_m_k <- sapply(1:K, function(k) sum(m[blocks == k]))
+  alpha <- rbeta(K, 1 + sum_m_k, 1 + n_k - sum_m_k)
+  
+  idx_m <- which(m == 1)
+  XtX_c <- XtX_total
+  Xty_c <- Xty_total
+  
+  if (length(idx_m) > 0) {
+   Bm <- Bgam[idx_m, , drop = FALSE]
+   ym <- y[idx_m]
+   XtX_c <- XtX_c - crossprod(Bm)
+   Xty_c <- Xty_c - crossprod(Bm, ym)
+  }
+  
+  Q <- (XtX_c / sigma2) + (Sgam / tau2)
+  diag(Q) <- diag(Q) + 1e-6
+  
+  rhs <- Xty_c / sigma2
+  L <- tryCatch(chol(Q), error = function(e) NULL)
+  
+  if (!is.null(L)) {
+   mu_beta <- backsolve(L, forwardsolve(t(L), rhs))
+   z <- rnorm(d)
+   beta <- mu_beta + backsolve(L, z)
+  } else {
+   beta <- rep(0, d) 
+  }
+  
+  idx_c <- which(m == 0)
+  if (length(idx_c) > 0) {
+   resid <- y[idx_c] - as.vector(Bgam[idx_c, , drop = FALSE] %*% beta)
+   sse <- sum(resid^2)
+   sigma2 <- 1 / rgamma(1, shape = length(idx_c)/2, rate = sse/2)
+  }
+  
+  roughness <- as.numeric(t(beta) %*% Sgam %*% beta)
+  tau2 <- 1 / rgamma(1, shape = rank_S/2, rate = roughness/2)
+  
+  if (iter > burn_in) {
+   idx <- iter - burn_in
+   samples_beta[idx, ] <- beta
+   samples_alpha[idx, ] <- alpha
+   samples_sigma2[idx] <- sigma2
+   samples_tau2[idx] <- tau2
+   sum_m_probs <- sum_m_probs + m
+  }
+ }
+ 
+ beta_hat <- colMeans(samples_beta)
+ alpha_hat <- colMeans(samples_alpha) 
+ sigma_hat <- sqrt(mean(samples_sigma2))
+ tau2_hat <- mean(samples_tau2)
+ m_probs_hat <- sum_m_probs / n_save
+ 
+ X_eval <- predict(gam_naive, newdata = eval_grid, type = "lpmatrix")
+ f_est <- as.numeric(X_eval %*% beta_hat)
+ 
+ f_samples <- X_eval %*% t(samples_beta) 
+ lower <- apply(f_samples, 1, quantile, probs = 0.025)
+ upper <- apply(f_samples, 1, quantile, probs = 0.975)
+ 
+ sigma_ci_lower <- sqrt(quantile(samples_sigma2, 0.025))
+ sigma_ci_upper <- sqrt(quantile(samples_sigma2, 0.975))
+ 
+ tau2_ci_lower <- quantile(samples_tau2, 0.025)
+ tau2_ci_upper <- quantile(samples_tau2, 0.975)
+ 
+ alpha_ci_lower <- apply(samples_alpha, 2, quantile, probs = 0.025)
+ alpha_ci_upper <- apply(samples_alpha, 2, quantile, probs = 0.975)
+ 
+ time_elapsed <- as.numeric(Sys.time() - t0)
+ 
+ return(list(
+  f_est = f_est, lower = lower, upper = upper,
+  sigma = sigma_hat, sigma_ci_lower = sigma_ci_lower, sigma_ci_upper = sigma_ci_upper,
+  alpha = alpha_hat, alpha_ci_lower = alpha_ci_lower, alpha_ci_upper = alpha_ci_upper,
+  tau2 = tau2_hat, tau2_ci_lower = tau2_ci_lower, tau2_ci_upper = tau2_ci_upper,
+  m_probs = m_probs_hat, time = time_elapsed
+ ))
+}
+
+# Variational Inference - Updated for K-Blocks According to ELE Asusmption
+# ------------------------------------------------------------------------------
+fit_vi <- function(dat, K, maxiter = 100) {
+ t0 <- Sys.time()
+ 
+ df <- data.frame(x = dat$x, y = dat$y_obs)
+ formula <- y ~ s(x, bs="cr", k=25)
+ blocks <- dat$blocks 
+ 
+ gam_naive <- gam(formula, data = df)
+ gamobj <- gam(formula, data = df, fit = FALSE)
+ 
+ beta_naive <- coef(gam_naive) 
+ n <- length(gam_naive$fitted.values)
+ 
+ Sgam <- rbind(0, cbind(0, gamobj$smooth[[1]]$S[[1]]))
+ Bgam <- as.matrix(gamobj$X)
+ 
+ d <- ncol(Bgam)
+ d_null <- sum(svd(Sgam)$d < sqrt(.Machine$double.eps))
+ dstar <- d - d_null
+ 
+ y <- df$y
+ kdeobj <- density(y)
+ kdefun <- approxfun(kdeobj$x, kdeobj$y, method = "constant", rule = 2) 
+ fy <- kdefun(y)
+ 
+ par_beta <- list(mu = beta_naive, Prec = crossprod(Bgam))
+ par_sigmasq <- list(shape = (n - d)/2, rate = sum(residuals(gam_naive)^2)/2)
+ par_pi <- list(a = rep(1, K), b = rep(1, K)) 
+ par_tausq <- list(shape = dstar/2, rate = sum(beta_naive * (Sgam %*% beta_naive)) / 2)
+ 
+ n_k <- sapply(1:K, function(k) sum(blocks == k))
+ 
+ # Coordinate Ascent Loop
+ for(ii in 1:maxiter) {
+  
+  E_log_pi_a_k <- digamma(par_pi$a) - digamma(par_pi$a + par_pi$b)          
+  E_log_pi_b_k <- digamma(par_pi$b) - digamma(par_pi$a + par_pi$b)           
+  
+  E_log_pi_a_obs <- E_log_pi_a_k[blocks]
+  E_log_pi_b_obs <- E_log_pi_b_k[blocks]
+  
+  log_prob_mm_unnorm <- E_log_pi_a_obs + log(fy)
+  
+  E_reciproc_sigmasq <- par_sigmasq$shape / par_sigmasq$rate
+  E_fit <- Bgam %*% par_beta$mu
+  
+  invPrec_B <- t(solve(par_beta$Prec, t(Bgam)))
+  E_Quad <- rowSums(Bgam * invPrec_B) + (E_fit^2) * E_reciproc_sigmasq
+  
+  E_log_reciproc_sigmasq <- digamma(par_sigmasq$shape) - log(par_sigmasq$rate)
+  log_prob_cm_unnorm <- E_log_pi_b_obs - 0.5*(y^2 - 2*y * E_fit)*E_reciproc_sigmasq - 
+   0.5*log(2*pi) + 0.5 * E_log_reciproc_sigmasq - 0.5*E_Quad
+  
+  logpmax <- pmax(log_prob_mm_unnorm, log_prob_cm_unnorm)
+  logsumexp <- logpmax + log(exp(log_prob_mm_unnorm - logpmax) + exp(log_prob_cm_unnorm - logpmax))
+  par_m <- exp(log_prob_mm_unnorm - logsumexp)
+  
+  sum_m_k <- sapply(1:K, function(k) sum(par_m[blocks == k]))
+  
+  par_pi$a <- 1 + sum_m_k
+  par_pi$b <- 1 + n_k - sum_m_k
+  
+  reg_weights <- 1 - par_m
+  Prec_upd <- crossprod(Bgam, sweep(Bgam, MARGIN = 1, STATS = reg_weights, FUN = "*"))
+  
+  E_reciproc_tausq <- par_tausq$shape / par_tausq$rate
+  E_lambda <- (1/E_reciproc_sigmasq) * E_reciproc_tausq       
+  Prec_upd <- Prec_upd + E_lambda * Sgam    
+  mu_upd <- solve(Prec_upd, crossprod(Bgam, reg_weights * y))
+  
+  par_beta$Prec <- Prec_upd
+  par_beta$mu <- as.numeric(mu_upd)
+  
+  par_sigmasq$shape <- sum(reg_weights)/2
+  invPrec_upd_B <- t(solve(Prec_upd, t(Bgam)))
+  trace_term <- rowSums(Bgam * invPrec_upd_B)
+  
+  par_sigmasq$rate <- sum(reg_weights * ((y - as.numeric(Bgam %*% mu_upd))^2 + 
+                                          (1/E_reciproc_sigmasq) * trace_term)) / 2 
+  
+  par_tausq$rate <- (sum(Sgam * solve(Prec_upd)) * (1/E_reciproc_sigmasq) + 
+                      sum(mu_upd * (Sgam %*% mu_upd))) / 2      
+ }
+ 
+ Sigma_beta <- solve(par_beta$Prec) * (1 / (par_sigmasq$shape / par_sigmasq$rate)) 
+ 
+ X_eval <- predict(gam_naive, newdata = eval_grid, type = "lpmatrix")
+ f_est <- as.numeric(X_eval %*% par_beta$mu)
+ 
+ se_f <- sqrt(rowSums((X_eval %*% Sigma_beta) * X_eval))
+ lower <- f_est - 1.96 * se_f
+ upper <- f_est + 1.96 * se_f
+ 
+ sigma_est <- sqrt(par_sigmasq$rate / (par_sigmasq$shape - 1))
+ tau2_est <- par_tausq$rate / (par_tausq$shape - 1)
+ 
+ alpha_est <- par_pi$a / (par_pi$a + par_pi$b)
+ 
+ sigma_ci_lower <- sqrt(qgamma(0.975, shape=par_sigmasq$shape, rate=par_sigmasq$rate)^-1)
+ sigma_ci_upper <- sqrt(qgamma(0.025, shape=par_sigmasq$shape, rate=par_sigmasq$rate)^-1)
+ 
+ tau2_ci_lower <- qgamma(0.975, shape=par_tausq$shape, rate=par_tausq$rate)^-1
+ tau2_ci_upper <- qgamma(0.025, shape=par_tausq$shape, rate=par_tausq$rate)^-1
+ 
+ alpha_ci_lower <- qbeta(0.025, par_pi$a, par_pi$b)
+ alpha_ci_upper <- qbeta(0.975, par_pi$a, par_pi$b)
+ 
+ time_elapsed <- as.numeric(Sys.time() - t0)
+ 
+ return(list(
+  f_est = f_est, lower = lower, upper = upper,
+  sigma = sigma_est, sigma_ci_lower = sigma_ci_lower, sigma_ci_upper = sigma_ci_upper,
+  alpha = alpha_est, alpha_ci_lower = alpha_ci_lower, alpha_ci_upper = alpha_ci_upper,
+  tau2 = tau2_est, tau2_ci_lower = tau2_ci_lower, tau2_ci_upper = tau2_ci_upper,
+  m_probs = as.numeric(par_m), time = time_elapsed
+ ))
+}
+
+# Simulation Worker
+# ------------------------------------------------------------------------------
+run_replication <- function(sim_id, param, global_seed) {
+ set.seed(global_seed)
+ 
+ dat <- generate_data(param$n, param$sigma, param$K, param$alphas, rep_id = sim_id, global_seed = global_seed)
+ sim_dat <- data.frame(x = dat$x, y_obs = dat$y_obs, y_true = dat$y_true, z = dat$z)
+ 
+ res_list <- list()
+ 
+ # Helper function to isolate methods and track failures
+ safe_run <- function(name, expr) {
+  t0 <- Sys.time()
+  tryCatch({
+   res <- eval(expr)
+   c(list(Method=name), res, list(time=as.numeric(Sys.time()-t0), Failed=0))
+  }, error = function(e) {
+   list(Method=name, f_est=rep(NA, 200), lower=rep(NA, 200), upper=rep(NA, 200),
+        sigma=NA, sigma_ci_lower=NA, sigma_ci_upper=NA,
+        alpha=rep(NA, param$K), alpha_ci_lower=rep(NA, param$K), alpha_ci_upper=rep(NA, param$K),
+        tau2=NA, tau2_ci_lower=NA, tau2_ci_upper=NA,
+        m_probs=rep(NA, length(dat$y_obs)), time=as.numeric(Sys.time()-t0), Failed=1)
+  })
+ }
+ 
+ # Oracle Baseline
+ res_list[[1]] <- safe_run("Oracle", {
+  fit <- gam(y_true ~ s(x, bs="cr", k=25), data = sim_dat, method="REML")
+  p <- predict(fit, newdata = eval_grid, se.fit=TRUE)
+  list(f_est=p$fit, lower=p$fit - 1.96*p$se.fit, upper=p$fit + 1.96*p$se.fit)
+ })
+ 
+ # Naive Baseline
+ res_list[[2]] <- safe_run("Naive", {
+  fit <- gam(y_obs ~ s(x, bs="cr", k=25), data = sim_dat, method="REML")
+  p <- predict(fit, newdata = eval_grid, se.fit=TRUE)
+  list(f_est=p$fit, lower=p$fit - 1.96*p$se.fit, upper=p$fit + 1.96*p$se.fit)
+ })
+ 
+ # ELE Adjustment Strategies
+ ele_strategies <- list("ELE_n1_5" = param$n^(1/5), "ELE_n1_2" = param$n^(1/2), "ELE_GCV" = "GCV", "ELE_REML" = "REML")
+ idx <- 3
+ for (strat_name in names(ele_strategies)) {
+  res_list[[idx]] <- safe_run(strat_name, { fit_ele(dat, param$K, param$alphas, sp_choice = ele_strategies[[strat_name]], sigma_true = param$sigma, eval_grid = eval_grid) })
+  idx <- idx + 1
+ }
+ 
+ # Gibbs Sampler
+ res_list[[idx]] <- safe_run("Gibbs", { fit_gibbs(dat, param$K) })
+ idx <- idx + 1
+ 
+ # Variational Inference
+ res_list[[idx]] <- safe_run("VB", { fit_vi(dat, param$K) })
+ 
+ # Compile Metrics
+ fit_oracle_true <- gam(y_true ~ s(x, bs="cr", k=25), data = sim_dat, method="REML")
+ oracle_beta <- coef(fit_oracle_true)
+ Sgam_oracle <- rbind(0, cbind(0, fit_oracle_true$smooth[[1]]$S[[1]]))
+ # true_tau2 using the Oracle fit to align with mgcv's internal penalty scaling
+ # The penalty matrix rank for bs="cr" with k=25 is 23
+ true_tau2 <- as.numeric(t(oracle_beta) %*% Sgam_oracle %*% oracle_beta) / 23
+ 
+ metrics <- lapply(res_list, function(res) {
+  if (res$Failed == 1) {
+   df_base <- data.frame(
+    n = param$n, sigma_true = param$sigma, K = param$K, Alpha_Setting = paste(param$alphas, collapse = "_"), 
+    Method = res$Method, RMSE = NA, Coverage = NA, Bias_Sigma = NA, Cov_Sigma = NA,
+    Bias_Alpha_1 = NA, Cov_Alpha_1 = NA, Bias_Alpha_2 = NA, Cov_Alpha_2 = NA,
+    Bias_Alpha_3 = NA, Cov_Alpha_3 = NA, Bias_Alpha_4 = NA, Cov_Alpha_4 = NA,
+    Tau2_Est = NA, Bias_Tau2 = NA, Cov_Tau2 = NA, Time = res$time, Failed = 1
+   )
+   pt_df <- as.data.frame(t(rep(NA, 200)))
+   colnames(pt_df) <- paste0("pt_cov_", 1:200)
+   return(cbind(df_base, pt_df))
+  }
+  
+  # Get a 200-point logical vector for true point-wise coverage tracking
+  rmse <- sqrt(mean((res$f_est - true_f_eval)^2))
+  pt_coverage <- as.numeric(res$lower <= true_f_eval & res$upper >= true_f_eval)
+  coverage_mean <- mean(pt_coverage, na.rm=TRUE)
+  
+  bias_sigma <- if (!is.null(res$sigma)) res$sigma - param$sigma else NA
+  cov_sigma <- if (!is.null(res$sigma_ci_lower)) as.numeric(param$sigma >= res$sigma_ci_lower & param$sigma <= res$sigma_ci_upper) else NA
+  
+  bias_alpha <- rep(NA, 4); cov_alpha <- rep(NA, 4)
+  if (!is.null(res$alpha)) {
+   for (k in 1:param$K) {
+    bias_alpha[k] <- res$alpha[k] - param$alphas[k]
+    if (!is.null(res$alpha_ci_lower)) cov_alpha[k] <- as.numeric(param$alphas[k] >= res$alpha_ci_lower[k] & param$alphas[k] <= res$alpha_ci_upper[k])
+   }
+  }
+  
+  tau2_est <- if(!is.null(res$tau2)) res$tau2 else NA
+  bias_tau2 <- if(!is.null(res$tau2)) res$tau2 - true_tau2 else NA
+  cov_tau2 <- if(!is.null(res$tau2_ci_lower)) as.numeric(true_tau2 >= res$tau2_ci_lower & true_tau2 <= res$tau2_ci_upper) else NA
+  
+  df_base <- data.frame(
+   n = param$n, sigma_true = param$sigma, K = param$K, Alpha_Setting = paste(param$alphas, collapse = "_"), 
+   Method = res$Method, RMSE = rmse, Coverage = coverage_mean, Bias_Sigma = bias_sigma, Cov_Sigma = cov_sigma,
+   Bias_Alpha_1 = bias_alpha[1], Cov_Alpha_1 = cov_alpha[1], Bias_Alpha_2 = bias_alpha[2], Cov_Alpha_2 = cov_alpha[2],
+   Bias_Alpha_3 = bias_alpha[3], Cov_Alpha_3 = cov_alpha[3], Bias_Alpha_4 = bias_alpha[4], Cov_Alpha_4 = cov_alpha[4],
+   Tau2_Est = tau2_est, Bias_Tau2 = bias_tau2, Cov_Tau2 = cov_tau2, Time = res$time, Failed = 0
+  )
+  pt_df <- as.data.frame(t(pt_coverage))
+  colnames(pt_df) <- paste0("pt_cov_", 1:200)
+  cbind(df_base, pt_df)
+ })
+ do.call(rbind, metrics)
+}
+
+# Perform Replications
+# ------------------------------------------------------------------------------
+task_env <- Sys.getenv("SLURM_ARRAY_TASK_ID")
+
+if (task_env == "") {
+ cat("\n Local Test (1 replication) \n")
+ test_sigmas <- c(0.1, 0.25, 0.75, 1.0, 1.25)
+ for (sig in test_sigmas) {
+  cat(sprintf("\n sigma = %.2f, alpha = 0.3, n = 500 \n", sig))
+  test_param <- list(n = 500, sigma = sig, K = 1, alphas = 0.3)
+  t_start <- Sys.time()
+  
+  success <- FALSE
+  attempt <- 0
+  while(!success) {
+   attempt <- attempt + 1
+   test_res <- run_replication(sim_id = 999 + attempt, param = test_param, global_seed = 12345 + attempt)
+   if (sum(test_res$Failed) == 0) {
+    success <- TRUE
+   } else {
+    cat(sprintf("Method(s) %s crashed.\n", paste(test_res$Method[test_res$Failed == 1], collapse=", ")))
+   }
+  }
+  
+  t_end <- Sys.time()
+  formatted <- as.data.frame(t(test_res))
+  colnames(formatted) <- formatted["Method", ]
+  formatted <- formatted[!(rownames(formatted) %in% c("Method", "n", "sigma_true", "K")), ]
+  formatted[] <- lapply(formatted, function(x) { num_x <- suppressWarnings(as.numeric(x)); ifelse(is.na(num_x), x, round(num_x, 4)) })
+  print(formatted[c("RMSE", "Coverage", "Failed"), ])
+  cat(sprintf(" Time: %.2f sec\n", as.numeric(t_end - t_start, units="secs")))
+ }
+} else {
+ task_id <- as.integer(task_env)
+ TASKS_PER_SCENARIO <- 10
+ REPS_PER_TASK <- 100
+ 
+ scenario_idx <- ((task_id - 1) %/% TASKS_PER_SCENARIO) + 1
+ chunk_idx <- ((task_id - 1) %% TASKS_PER_SCENARIO) + 1
+ current_param <- scenarios[[scenario_idx]]
+ 
+ start_rep <- (chunk_idx - 1) * REPS_PER_TASK + 1
+ end_rep <- chunk_idx * REPS_PER_TASK
+ 
+ cat(sprintf("Task %d: Scenario %d (n=%d, sigma=%.2f, K=%d) | Replications %d to %d\n", 
+             task_id, scenario_idx, current_param$n, current_param$sigma, current_param$K, start_rep, end_rep))
+ 
+ chunk_results <- list()
+ successful_reps <- 0
+ attempt <- 0
+ 
+ # Loop until we get REPS_PER_TASK datasets where all methods work
+ while (successful_reps < REPS_PER_TASK) {
+  attempt <- attempt + 1
+  current_rep_id <- start_rep + attempt - 1
+  unique_seed <- scenario_idx * 100000 + current_rep_id 
+  
+  res_df <- run_replication(sim_id = current_rep_id, param = current_param, global_seed = unique_seed)
+  
+  if (sum(res_df$Failed) == 0) {
+   chunk_results[[length(chunk_results) + 1]] <- res_df
+   successful_reps <- successful_reps + 1
+  } else {
+   failed_rows <- res_df[res_df$Failed == 1, ]
+   chunk_results[[length(chunk_results) + 1]] <- failed_rows
+   cat(sprintf("Attempt %d failed for %s.\n", attempt, paste(failed_rows$Method, collapse=", ")))
+  }
+ }
+ 
+ final_chunk_data <- do.call(rbind, chunk_results)
+ out_dir <- "sim_results"
+ if (!dir.exists(out_dir)) dir.create(out_dir, showWarnings = FALSE)
+ out_file <- file.path(out_dir, sprintf("res_scen_%02d_chunk_%02d.rds", scenario_idx, chunk_idx))
+ saveRDS(final_chunk_data, out_file)
+}
+```
+
